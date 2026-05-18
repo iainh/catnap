@@ -429,9 +429,26 @@ impl<T> RestClientBuilder<T> {
         self
     }
 
-    /// Sets a request timeout on the underlying `reqwest::Client`.
+    /// Sets a total request timeout on the underlying `reqwest::Client`.
+    ///
+    /// This is an alias for [`Self::request_timeout`].
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.config.timeout = Some(timeout);
+        self
+    }
+
+    /// Sets a total request timeout on the underlying `reqwest::Client`.
+    ///
+    /// The timeout covers the whole request, from connection through response
+    /// body download.
+    pub fn request_timeout(mut self, timeout: Duration) -> Self {
+        self.config.timeout = Some(timeout);
+        self
+    }
+
+    /// Sets the timeout for establishing a connection.
+    pub fn connect_timeout(mut self, timeout: Duration) -> Self {
+        self.config.connect_timeout = Some(timeout);
         self
     }
 
@@ -496,8 +513,10 @@ pub struct RestClientConfig {
     pub default_headers: HeaderMap,
     /// Whether the underlying client follows redirects.
     pub follow_redirects: bool,
-    /// Optional request timeout.
+    /// Optional total request timeout.
     pub timeout: Option<Duration>,
+    /// Optional connection-establishment timeout.
+    pub connect_timeout: Option<Duration>,
     /// Encoding style for repeated query parameters.
     pub query_param_style: QueryParamStyle,
 }
@@ -530,6 +549,9 @@ impl RestClient {
 
         if let Some(timeout) = config.timeout {
             client = client.timeout(timeout);
+        }
+        if let Some(timeout) = config.connect_timeout {
+            client = client.connect_timeout(timeout);
         }
 
         Ok(Self {
@@ -983,6 +1005,23 @@ mod tests {
             MediaOperation::ResponseDeserialization.to_string(),
             "response deserialization"
         );
+    }
+
+    #[test]
+    fn builder_sets_split_timeouts() {
+        let builder = RestClientBuilder::<RestClient>::new()
+            .request_timeout(Duration::from_secs(10))
+            .connect_timeout(Duration::from_secs(2));
+
+        assert_eq!(builder.config.timeout, Some(Duration::from_secs(10)));
+        assert_eq!(builder.config.connect_timeout, Some(Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn timeout_sets_total_request_timeout() {
+        let builder = RestClientBuilder::<RestClient>::new().timeout(Duration::from_secs(10));
+
+        assert_eq!(builder.config.timeout, Some(Duration::from_secs(10)));
     }
 
     #[cfg(feature = "basic-auth")]

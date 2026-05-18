@@ -300,7 +300,8 @@ use std::time::Duration;
 let client = UsersClient::builder()
     .base_url("https://api.example.com")?
     .follow_redirects(true)
-    .timeout(Duration::from_secs(10))
+    .connect_timeout(Duration::from_secs(2))
+    .request_timeout(Duration::from_secs(10))
     .header("User-Agent", "my-service")?
     .build()?;
 # use catnap::{get, rest_client, Result};
@@ -318,7 +319,8 @@ The builder configures:
 - Default headers
 - Basic authentication
 - Redirect handling
-- Request timeout
+- Connect timeout
+- Total request timeout
 - Repeated query parameter encoding
 
 Generated clients are cloneable. Clones share the underlying `reqwest::Client`.
