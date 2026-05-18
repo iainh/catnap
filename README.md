@@ -87,5 +87,6 @@ The `catnap` crate includes examples using public `httpbin.io` endpoints:
 ```sh
 cargo run -p catnap --example httpbin_json
 cargo run -p catnap --example httpbin_status
+cargo run -p catnap --example httpbin_basic_auth
 cargo run -p catnap --features xml --example httpbin_xml
 ```

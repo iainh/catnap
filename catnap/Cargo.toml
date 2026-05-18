@@ -7,6 +7,7 @@ rust-version.workspace = true
 version.workspace = true
 
 [dependencies]
+base64 = { workspace = true, optional = true }
 http.workspace = true
 percent-encoding.workspace = true
 quick-xml = { workspace = true, optional = true }
@@ -18,7 +19,8 @@ url.workspace = true
 catnap-macros = { path = "../catnap-macros" }
 
 [features]
-default = ["json"]
+default = ["basic-auth", "json"]
+basic-auth = ["dep:base64"]
 json = ["reqwest/json"]
 xml = ["dep:quick-xml"]
 
@@ -38,3 +40,8 @@ required-features = ["xml"]
 [[example]]
 name = "httpbin_status"
 path = "examples/httpbin_status.rs"
+
+[[example]]
+name = "httpbin_basic_auth"
+path = "examples/httpbin_basic_auth.rs"
+required-features = ["basic-auth", "json"]

@@ -12,6 +12,7 @@ rust-version = "1.95"
 version = "0.2.0"
 
 [workspace.dependencies]
+base64 = "0.22"
 http = "1"
 percent-encoding = "2"
 proc-macro-crate = "3"

@@ -44,6 +44,9 @@ use std::marker::PhantomData;
 use std::time::Duration;
 use url::Url;
 
+#[cfg(feature = "basic-auth")]
+use base64::Engine;
+
 /// Crate-wide result type.
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -156,6 +159,13 @@ impl<T> RestClientBuilder<T> {
             })?;
         self.config.default_headers.insert(name, value);
         Ok(self)
+    }
+
+    #[cfg(feature = "basic-auth")]
+    pub fn basic_auth(self, username: impl AsRef<str>, password: impl AsRef<str>) -> Result<Self> {
+        let credentials = format!("{}:{}", username.as_ref(), password.as_ref());
+        let encoded = base64::engine::general_purpose::STANDARD.encode(credentials);
+        self.header("Authorization", format!("Basic {encoded}"))
     }
 
     pub fn follow_redirects(mut self, enabled: bool) -> Self {
@@ -500,5 +510,20 @@ mod tests {
     #[test]
     fn path_segment_encoding_preserves_single_segment() {
         assert_eq!(__private::encode_path_segment("a/b c"), "a%2Fb%20c");
+    }
+
+    #[cfg(feature = "basic-auth")]
+    #[test]
+    fn basic_auth_sets_authorization_header() {
+        let builder = RestClientBuilder::<RestClient>::new()
+            .basic_auth("catnap", "secret")
+            .expect("basic auth header should be valid");
+        let value = builder
+            .config
+            .default_headers
+            .get("Authorization")
+            .expect("authorization header should be set");
+
+        assert_eq!(value, "Basic Y2F0bmFwOnNlY3JldA==");
     }
 }
