@@ -25,3 +25,16 @@ xml = ["dep:quick-xml"]
 [dev-dependencies]
 serde_json.workspace = true
 tokio.workspace = true
+
+[[example]]
+name = "httpbin_json"
+path = "examples/httpbin_json.rs"
+
+[[example]]
+name = "httpbin_xml"
+path = "examples/httpbin_xml.rs"
+required-features = ["xml"]
+
+[[example]]
+name = "httpbin_status"
+path = "examples/httpbin_status.rs"
