@@ -19,9 +19,10 @@ url.workspace = true
 catnap-macros = { path = "../catnap-macros" }
 
 [features]
-default = ["basic-auth", "json"]
+default = ["basic-auth", "json", "tls-rustls"]
 basic-auth = []
 json = ["dep:serde_json", "reqwest/json"]
+tls-rustls = ["reqwest/rustls"]
 xml = ["dep:quick-xml"]
 
 [dev-dependencies]

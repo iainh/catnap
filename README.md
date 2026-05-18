@@ -372,21 +372,28 @@ Default features:
 
 - `json`: JSON request and response bodies with `serde_json`
 - `basic-auth`: `RestClientBuilder::basic_auth`
+- `tls-rustls`: HTTPS support through reqwest's Rustls backend
 
 Optional features:
 
 - `xml`: XML request and response bodies with `quick-xml`
 
-Minimal install without default features:
+Minimal HTTP-only install without default features:
 
 ```toml
 catnap = { version = "0.2", default-features = false }
 ```
 
-JSON without basic auth:
+JSON without basic auth or TLS:
 
 ```toml
 catnap = { version = "0.2", default-features = false, features = ["json"] }
+```
+
+JSON with HTTPS but without basic auth:
+
+```toml
+catnap = { version = "0.2", default-features = false, features = ["json", "tls-rustls"] }
 ```
 
 JSON and XML:

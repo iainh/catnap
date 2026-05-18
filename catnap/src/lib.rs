@@ -107,10 +107,11 @@
 //!
 //! # Feature flags
 //!
-//! The default features are `json` and `basic-auth`.
+//! The default features are `json`, `basic-auth`, and `tls-rustls`.
 //!
 //! - `json` enables JSON request and response bodies.
 //! - `basic-auth` enables [`RestClientBuilder::basic_auth`].
+//! - `tls-rustls` enables HTTPS through reqwest's Rustls backend.
 //! - `xml` enables XML request and response bodies.
 //!
 //! # Logging
