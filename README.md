@@ -44,7 +44,7 @@ trait Users {
     async fn list(&self) -> Result<Vec<User>>;
 
     #[get("/{id}")]
-    async fn get(&self, #[path("id")] id: &str) -> Result<User>;
+    async fn get(&self, #[path()] id: &str) -> Result<User>;
 
     #[post("")]
     async fn create(&self, user: &NewUser) -> Result<User>;
@@ -75,8 +75,8 @@ Rust:
 - `#[rest_client]` defines a typed remote resource.
 - `#[get]`, `#[post]`, `#[put]`, `#[patch]`, `#[delete]`, `#[options]` and
   `#[head]` define HTTP methods.
-- `#[path("name")]` replaces `{name}` placeholders in the request path.
-- `#[query("name")]` adds query parameters.
+- `#[path()]` or `#[path("name")]` replaces `{name}` placeholders in the request path.
+- `#[query()]` or `#[query("name")]` adds query parameters.
 - `#[header("Name")]` adds per-request headers.
 - `#[consumes("type/subtype")]` selects request body serialization.
 - `#[produces("type/subtype")]` selects response deserialization.
@@ -92,7 +92,7 @@ on HTTP method attributes. Catnap joins them and percent-encodes path parameter
 values as single path segments.
 
 ```rust
-use catnap::{get, path, query, rest_client, Result};
+use catnap::{get, rest_client, Result};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -106,16 +106,16 @@ trait Issues {
     #[get("/issues")]
     async fn list(
         &self,
-        #[path("owner")] owner: &str,
-        #[path("repo")] repo: &str,
-        #[query("state")] state: &str,
+        #[path()] owner: &str,
+        #[path()] repo: &str,
+        #[query()] state: &str,
     ) -> Result<Vec<Issue>>;
 }
 ```
 
-If a path contains `{owner}`, the method must have a matching
-`#[path("owner")]` argument. Extra `#[path]` arguments that do not match a
-placeholder are compile errors.
+If a path contains `{owner}`, the method must have a matching `#[path()]`
+argument named `owner` or an explicit `#[path("owner")]` argument. Extra
+`#[path()]` arguments that do not match a placeholder are compile errors.
 
 ## Query parameter style
 
@@ -132,7 +132,7 @@ async fn example() -> Result<()> {
 
     Ok(())
 }
-# use catnap::{get, query, rest_client};
+# use catnap::{get, rest_client};
 # #[rest_client]
 # trait Search {
 #     #[get("/search")]
@@ -167,7 +167,7 @@ let client = UsersClient::builder()
 Use method parameters for values that change per request:
 
 ```rust
-use catnap::{get, header, path, rest_client, Result};
+use catnap::{get, header, rest_client, Result};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -180,7 +180,7 @@ trait Users {
     #[get("/{id}")]
     async fn get(
         &self,
-        #[path("id")] id: &str,
+        #[path()] id: &str,
         #[header("X-Request-Id")] request_id: &str,
     ) -> Result<User>;
 }

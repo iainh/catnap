@@ -1,6 +1,6 @@
-use catnap::{Response, Result, rest_client};
 #[allow(unused_imports)]
-use catnap::{get, path};
+use catnap::get;
+use catnap::{Response, Result, rest_client};
 
 mod support;
 

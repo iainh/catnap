@@ -22,7 +22,7 @@
 //! #[rest_client(path = "/users")]
 //! trait Users {
 //!     #[get("/{id}")]
-//!     async fn get_user(&self, #[path("id")] id: &str) -> Result<User>;
+//!     async fn get_user(&self, #[path()] id: &str) -> Result<User>;
 //! }
 //!
 //! # async fn example() -> Result<()> {
@@ -63,8 +63,11 @@
 //!
 //! # Paths, query parameters, and headers
 //!
-//! Use [`path`], [`query`], and [`header`] on method arguments to bind values to
-//! the generated request.
+//! Use [`path`], [`query`], and [`header`] on method arguments to
+//! bind values to the generated request. Bare `#[path()]` and
+//! `#[query()]` infer the HTTP parameter name from the Rust argument name;
+//! use `#[path("name")]` or `#[query("name")]` when the remote API
+//! name differs.
 //!
 //! ```
 //! use catnap::{get, header, path, query, rest_client, Result};
@@ -80,9 +83,9 @@
 //!     #[get("/users/{id}")]
 //!     async fn get_user(
 //!         &self,
-//!         #[path("tenant")] tenant: &str,
-//!         #[path("id")] id: &str,
-//!         #[query("include")] include: &str,
+//!         #[path()] tenant: &str,
+//!         #[path()] id: &str,
+//!         #[query()] include: &str,
 //!         #[header("X-Request-Id")] request_id: &str,
 //!     ) -> Result<User>;
 //! }

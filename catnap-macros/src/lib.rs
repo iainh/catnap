@@ -61,7 +61,7 @@ pub fn head(_: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 
-/// Binds a method argument to a `{name}` path placeholder.
+/// Binds a method argument to a path placeholder.
 #[proc_macro_attribute]
 pub fn path(_: TokenStream, item: TokenStream) -> TokenStream {
     item
@@ -289,7 +289,7 @@ fn expand_method(
     let mut query_params = Vec::new();
     let mut header_params = Vec::new();
     let mut body_arg = None;
-    let mut path_param_names = Vec::new();
+    let mut path_names = Vec::new();
 
     for input in &mut method.sig.inputs {
         let FnArg::Typed(pat_type) = input else {
@@ -303,7 +303,7 @@ fn expand_method(
             )
         })?;
 
-        let bindings = take_parameter_attrs(&mut pat_type.attrs)?;
+        let bindings = take_parameter_attrs(&mut pat_type.attrs, &arg_ident)?;
         match bindings.as_slice() {
             [] => {
                 if matches!(verb.as_str(), "GET" | "HEAD") {
@@ -321,11 +321,11 @@ fn expand_method(
             }
             [
                 ParameterAttr {
-                    kind: ParameterAttrKind::Path,
+                    kind: ParameterAttrKind::PathParam,
                     name,
                 },
             ] => {
-                path_param_names.push(name.clone());
+                path_names.push(name.clone());
                 path_replacements.push(quote! {
                     path = path.replace(
                         concat!("{", #name, "}"),
@@ -335,7 +335,7 @@ fn expand_method(
             }
             [
                 ParameterAttr {
-                    kind: ParameterAttrKind::Query,
+                    kind: ParameterAttrKind::QueryParam,
                     name,
                 },
             ] => {
@@ -362,20 +362,20 @@ fn expand_method(
             _ => {
                 return Err(syn::Error::new_spanned(
                     pat_type,
-                    "REST client method parameters may have only one of #[path], #[query], or #[header]",
+                    "REST client method parameters may have only one of #[path()], #[query()], or #[header]",
                 ));
             }
         }
     }
 
-    if has_duplicate(&path_param_names) {
+    if has_duplicate(&path_names) {
         return Err(syn::Error::new_spanned(
             &method.sig.ident,
             "REST client path parameter names must be unique",
         ));
     }
 
-    validate_path_params(&full_path, &path_param_names, method)?;
+    validate_paths(&full_path, &path_names, method)?;
 
     let sig = method.sig.clone();
     let output = &sig.output;
@@ -516,12 +516,15 @@ struct ParameterAttr {
 
 #[derive(Debug)]
 enum ParameterAttrKind {
-    Path,
-    Query,
+    PathParam,
+    QueryParam,
     Header,
 }
 
-fn take_parameter_attrs(attrs: &mut Vec<Attribute>) -> syn::Result<Vec<ParameterAttr>> {
+fn take_parameter_attrs(
+    attrs: &mut Vec<Attribute>,
+    inferred_name: &Ident,
+) -> syn::Result<Vec<ParameterAttr>> {
     let mut bindings = Vec::new();
     let mut remove_indices = Vec::new();
 
@@ -529,7 +532,13 @@ fn take_parameter_attrs(attrs: &mut Vec<Attribute>) -> syn::Result<Vec<Parameter
         let Some(kind) = parameter_attr_kind(attr) else {
             continue;
         };
-        let name = parse_required_string_arg(attr, kind.name())?;
+        let name = match kind {
+            ParameterAttrKind::PathParam | ParameterAttrKind::QueryParam => {
+                parse_optional_string_arg(attr, kind.name())?
+                    .unwrap_or_else(|| inferred_name.to_string())
+            }
+            ParameterAttrKind::Header => parse_required_string_arg(attr, kind.name())?,
+        };
         validate_parameter_name(attr, &name, kind.name())?;
         if matches!(kind, ParameterAttrKind::Header) {
             validate_header_name(attr, &name)?;
@@ -548,8 +557,8 @@ fn take_parameter_attrs(attrs: &mut Vec<Attribute>) -> syn::Result<Vec<Parameter
 impl ParameterAttrKind {
     fn name(&self) -> &'static str {
         match self {
-            Self::Path => "path",
-            Self::Query => "query",
+            Self::PathParam => "path",
+            Self::QueryParam => "query",
             Self::Header => "header",
         }
     }
@@ -557,9 +566,9 @@ impl ParameterAttrKind {
 
 fn parameter_attr_kind(attr: &Attribute) -> Option<ParameterAttrKind> {
     if is_catnap_attr(attr, "path") {
-        Some(ParameterAttrKind::Path)
+        Some(ParameterAttrKind::PathParam)
     } else if is_catnap_attr(attr, "query") {
-        Some(ParameterAttrKind::Query)
+        Some(ParameterAttrKind::QueryParam)
     } else if is_catnap_attr(attr, "header") {
         Some(ParameterAttrKind::Header)
     } else {
@@ -696,11 +705,7 @@ fn validate_media_type(value: &str, span: proc_macro2::Span) -> syn::Result<Medi
     Ok(MediaType::parse(value))
 }
 
-fn validate_path_params(
-    full_path: &str,
-    path_param_names: &[String],
-    method: &TraitItemFn,
-) -> syn::Result<()> {
+fn validate_paths(full_path: &str, path_names: &[String], method: &TraitItemFn) -> syn::Result<()> {
     let placeholders = path_placeholders(full_path).map_err(|message| {
         syn::Error::new_spanned(
             &method.sig.ident,
@@ -716,7 +721,7 @@ fn validate_path_params(
     }
 
     for placeholder in &placeholders {
-        if !path_param_names.iter().any(|name| name == placeholder) {
+        if !path_names.iter().any(|name| name == placeholder) {
             return Err(syn::Error::new_spanned(
                 &method.sig.ident,
                 format!("missing #[path(\"{placeholder}\")] argument for path placeholder"),
@@ -724,7 +729,7 @@ fn validate_path_params(
         }
     }
 
-    for name in path_param_names {
+    for name in path_names {
         if !placeholders.iter().any(|placeholder| placeholder == name) {
             return Err(syn::Error::new_spanned(
                 &method.sig.ident,

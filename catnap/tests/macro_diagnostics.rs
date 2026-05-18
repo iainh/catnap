@@ -14,7 +14,7 @@ use catnap::{get, rest_client, Result};
 #[rest_client]
 trait Api {
     #[get("/items")]
-    async fn list(&self, #[catnap::query(name = "page")] page: u32) -> Result<()>;
+    async fn list(&self, #[query(name = "page")] page: u32) -> Result<()>;
 }
 
 fn main() {}
@@ -24,7 +24,7 @@ fn main() {}
         CompileCase::fail(
             "multiple_parameter_bindings",
             r#"
-use catnap::{get, path, query, rest_client, Result};
+use catnap::{get, rest_client, Result};
 
 #[rest_client]
 trait Api {
@@ -34,7 +34,7 @@ trait Api {
 
 fn main() {}
 "#,
-            "may have only one of #[path], #[query], or #[header]",
+            "may have only one of #[path()], #[query()], or #[header]",
         ),
         CompileCase::fail(
             "non_async_method",
@@ -130,7 +130,7 @@ fn main() {}
         CompileCase::fail(
             "tuple_parameter_pattern",
             r#"
-use catnap::{get, query, rest_client, Result};
+use catnap::{get, rest_client, Result};
 
 #[rest_client]
 trait Api {
@@ -145,7 +145,7 @@ fn main() {}
         CompileCase::fail(
             "empty_path_parameter_name",
             r#"
-use catnap::{get, path, rest_client, Result};
+use catnap::{get, rest_client, Result};
 
 #[rest_client]
 trait Api {
@@ -205,7 +205,7 @@ fn main() {}
         CompileCase::fail(
             "extra_path_argument",
             r#"
-use catnap::{get, path, rest_client, Result};
+use catnap::{get, rest_client, Result};
 
 #[rest_client(path = "/users")]
 trait Api {
@@ -220,7 +220,7 @@ fn main() {}
         CompileCase::fail(
             "duplicate_path_placeholders",
             r#"
-use catnap::{get, path, rest_client, Result};
+use catnap::{get, rest_client, Result};
 
 #[rest_client]
 trait Api {
@@ -271,11 +271,25 @@ use catnap::{rest_client, Result};
 trait Api {
     #[catnap::get("/{id}")]
     #[catnap::produces("text/plain")]
-    async fn get(&self, #[catnap::path("id")] id: &str) -> Result<String>;
+    async fn get(&self, #[path("id")] id: &str) -> Result<String>;
 
     #[catnap::post("/{id}")]
     #[catnap::consumes("text/plain")]
-    async fn rename(&self, #[catnap::path("id")] id: &str, name: &str) -> Result<()>;
+    async fn rename(&self, #[path("id")] id: &str, name: &str) -> Result<()>;
+}
+
+fn main() {}
+"#,
+        ),
+        CompileCase::pass(
+            "inferred_path_and_query_names",
+            r#"
+use catnap::{get, rest_client, Result};
+
+#[rest_client(path = "/users/{id}")]
+trait Api {
+    #[get("/posts")]
+    async fn list(&self, #[path()] id: &str, #[query()] page: u32) -> Result<()>;
 }
 
 fn main() {}

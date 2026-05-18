@@ -55,6 +55,9 @@ trait Users {
     #[catnap::consumes("application/xml")]
     #[catnap::produces("application/xml")]
     async fn create_xml(&self, user: &XmlUser) -> Result<XmlUser>;
+
+    #[get("/{id}/inferred")]
+    async fn inferred(&self, #[path()] id: &str, #[query()] include: &str) -> Result<Response>;
 }
 
 #[rest_client]
@@ -105,7 +108,7 @@ async fn generated_client_uses_query_param_style_for_collections() -> Result<()>
 }
 
 #[tokio::test]
-async fn generated_client_uses_comma_separated_query_style_for_slices() -> Result<()> {
+async fn generated_client_uses_comma_separated_query_param_style_for_slices() -> Result<()> {
     let server = TestServer::spawn("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n");
 
     let client = SearchClient::builder()
@@ -122,7 +125,7 @@ async fn generated_client_uses_comma_separated_query_style_for_slices() -> Resul
 }
 
 #[tokio::test]
-async fn generated_client_defaults_to_multi_pair_query_style() -> Result<()> {
+async fn generated_client_defaults_to_multi_pair_query_param_style() -> Result<()> {
     let server = TestServer::spawn("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n");
 
     let client = SearchClient::builder()
@@ -201,6 +204,26 @@ async fn generated_post_sends_headers_and_json_body() -> Result<()> {
 
     let body: serde_json::Value = serde_json::from_str(&request.body).expect("valid JSON body");
     assert_eq!(body, serde_json::json!({ "name": "Ada" }));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn generated_client_infers_path_and_query_names() -> Result<()> {
+    let server = TestServer::spawn("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n");
+
+    let client = UsersClient::builder()
+        .base_url(server.base_url())?
+        .build()?;
+
+    let response = client.inferred("42", "roles").await?;
+
+    let request = server.request();
+    assert_eq!(response.status(), catnap::http::StatusCode::NO_CONTENT);
+    assert_eq!(
+        request.line,
+        "GET /users/42/inferred?include=roles HTTP/1.1"
+    );
 
     Ok(())
 }
