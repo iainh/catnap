@@ -97,6 +97,12 @@ pub enum Error {
     },
     #[error("request failed: {0}")]
     Request(#[from] reqwest::Error),
+    #[cfg(feature = "xml")]
+    #[error("XML deserialization failed: {0}")]
+    XmlDeserialize(#[from] quick_xml::de::DeError),
+    #[cfg(feature = "xml")]
+    #[error("XML serialization failed: {0}")]
+    XmlSerialize(#[from] quick_xml::se::SeError),
     #[error("HTTP {status}: {body}")]
     Http { status: StatusCode, body: String },
 }
@@ -309,6 +315,25 @@ impl RequestBuilder {
         self
     }
 
+    pub fn xml<T: Serialize + ?Sized>(self, body: &T) -> Result<Self> {
+        #[cfg(feature = "xml")]
+        {
+            let mut this = self;
+            this.builder = this.builder.body(quick_xml::se::to_string(body)?);
+            Ok(this)
+        }
+
+        #[cfg(not(feature = "xml"))]
+        {
+            let _ = body;
+            let _ = self;
+            Err(Error::UnsupportedMediaType {
+                operation: "request body serialization",
+                media_type: "application/xml",
+            })
+        }
+    }
+
     pub async fn send(self) -> Result<Response> {
         let response = self.builder.send().await?;
         Ok(Response { inner: response })
@@ -332,6 +357,28 @@ impl RequestBuilder {
             return Err(Error::Http { status, body });
         }
         Ok(response.text().await?)
+    }
+
+    pub async fn send_xml<T: DeserializeOwned>(self) -> Result<T> {
+        #[cfg(feature = "xml")]
+        {
+            let response = self.builder.send().await?;
+            let status = response.status();
+            let body = response.text().await?;
+            if !status.is_success() {
+                return Err(Error::Http { status, body });
+            }
+            Ok(quick_xml::de::from_str(&body)?)
+        }
+
+        #[cfg(not(feature = "xml"))]
+        {
+            let _ = self;
+            Err(Error::UnsupportedMediaType {
+                operation: "response deserialization",
+                media_type: "application/xml",
+            })
+        }
     }
 
     pub async fn send_empty(self) -> Result<()> {
@@ -365,6 +412,22 @@ impl Response {
 
     pub async fn json<T: DeserializeOwned>(self) -> Result<T> {
         Ok(self.inner.json::<T>().await?)
+    }
+
+    pub async fn xml<T: DeserializeOwned>(self) -> Result<T> {
+        #[cfg(feature = "xml")]
+        {
+            Ok(quick_xml::de::from_str(&self.inner.text().await?)?)
+        }
+
+        #[cfg(not(feature = "xml"))]
+        {
+            let _ = self;
+            Err(Error::UnsupportedMediaType {
+                operation: "response deserialization",
+                media_type: "application/xml",
+            })
+        }
     }
 }
 

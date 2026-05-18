@@ -117,7 +117,9 @@ impl syn::parse::Parse for RestClientArgs {
 }
 
 const APPLICATION_JSON: &str = "application/json";
+const APPLICATION_XML: &str = "application/xml";
 const TEXT_PLAIN: &str = "text/plain";
+const TEXT_XML: &str = "text/xml";
 
 fn expand_rest_client(args: RestClientArgs, trait_item: &mut ItemTrait) -> TokenStream2 {
     trait_item
@@ -415,6 +417,9 @@ fn body_for(
         APPLICATION_JSON => Ok(quote! {
             request = request.content_type(#consumes).json(#arg);
         }),
+        APPLICATION_XML | TEXT_XML => Ok(quote! {
+            request = request.content_type(#consumes).xml(#arg)?;
+        }),
         TEXT_PLAIN => Ok(quote! {
             request = request.content_type(#consumes).text(#arg);
         }),
@@ -452,6 +457,8 @@ fn sender_for(
         Ok(quote! { request.send_text().await })
     } else if produces == APPLICATION_JSON {
         Ok(quote! { request.send_json::<#inner>().await })
+    } else if matches!(produces, APPLICATION_XML | TEXT_XML) {
+        Ok(quote! { request.send_xml::<#inner>().await })
     } else {
         Ok(quote! {
             Err(#catnap::Error::UnsupportedMediaType {

@@ -9,12 +9,17 @@ version.workspace = true
 [dependencies]
 http.workspace = true
 percent-encoding.workspace = true
+quick-xml = { workspace = true, optional = true }
 reqwest.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 url.workspace = true
 
 catnap-macros = { path = "../catnap-macros" }
+
+[features]
+default = []
+xml = ["dep:quick-xml"]
 
 [dev-dependencies]
 serde_json.workspace = true

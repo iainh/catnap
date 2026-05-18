@@ -5,7 +5,7 @@ A Rust REST client experiment inspired by the Eclipse MicroProfile REST Client 4
 The goal is simple client definitions with little boilerplate:
 
 ```rust
-use catnap::{get, path, post, produces, rest_client, Result};
+use catnap::{consumes, get, path, post, produces, rest_client, Result};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
@@ -33,6 +33,11 @@ trait Users {
     #[get("/{id}/name")]
     #[produces("text/plain")]
     async fn name(&self, #[path("id")] id: &str) -> Result<String>;
+
+    #[post("/xml")]
+    #[consumes("application/xml")]
+    #[produces("application/xml")]
+    async fn create_xml(&self, user: &User) -> Result<User>;
 }
 
 async fn example() -> Result<()> {
@@ -46,6 +51,12 @@ async fn example() -> Result<()> {
 }
 ```
 
+Enable XML support with:
+
+```toml
+catnap = { version = "0.1", features = ["xml"] }
+```
+
 ## Current Scope
 
 This first slice supports:
@@ -57,7 +68,7 @@ This first slice supports:
 - Header parameters with `#[header("Name")]`
 - Media types with `#[consumes("...")]` and `#[produces("...")]`, defaulting to `application/json`
 - JSON request bodies from the first unannotated argument
-- JSON response decoding, `text/plain` string responses, raw `Response`, and `Result<()>`
+- JSON request/response bodies, optional XML request/response bodies, `text/plain` string responses, raw `Response`, and `Result<()>`
 - Builder configuration for base URL, default headers, redirect handling, timeout, and query parameter style
 
 The design intentionally mirrors MicroProfile's developer experience while staying idiomatic for Rust: explicit async traits, typed `Result`, and serde-powered JSON.

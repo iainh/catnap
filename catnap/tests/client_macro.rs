@@ -13,6 +13,12 @@ struct NewUser {
     name: String,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename = "user")]
+struct XmlUser {
+    id: String,
+}
+
 #[rest_client(path = "/users", produces = "application/json")]
 trait Users {
     #[get("")]
@@ -35,6 +41,11 @@ trait Users {
     #[post("/{id}/name")]
     #[catnap::consumes("text/plain")]
     async fn rename(&self, #[path("id")] id: &str, name: &str) -> Result<()>;
+
+    #[post("/xml")]
+    #[catnap::consumes("application/xml")]
+    #[catnap::produces("application/xml")]
+    async fn create_xml(&self, user: &XmlUser) -> Result<XmlUser>;
 }
 
 #[test]

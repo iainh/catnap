@@ -16,6 +16,7 @@ http = "1"
 percent-encoding = "2"
 proc-macro-crate = "3"
 proc-macro2 = "1"
+quick-xml = { version = "0.38", features = ["serialize"] }
 quote = "1"
 reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"] }
 serde = { version = "1", features = ["derive"] }
