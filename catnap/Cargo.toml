@@ -18,7 +18,8 @@ url.workspace = true
 catnap-macros = { path = "../catnap-macros" }
 
 [features]
-default = []
+default = ["json"]
+json = ["reqwest/json"]
 xml = ["dep:quick-xml"]
 
 [dev-dependencies]

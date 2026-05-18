@@ -305,9 +305,23 @@ impl RequestBuilder {
         self
     }
 
-    pub fn json<T: Serialize + ?Sized>(mut self, body: &T) -> Self {
-        self.builder = self.builder.json(body);
-        self
+    pub fn json<T: Serialize + ?Sized>(self, body: &T) -> Result<Self> {
+        #[cfg(feature = "json")]
+        {
+            let mut this = self;
+            this.builder = this.builder.json(body);
+            Ok(this)
+        }
+
+        #[cfg(not(feature = "json"))]
+        {
+            let _ = body;
+            let _ = self;
+            Err(Error::UnsupportedMediaType {
+                operation: "request body serialization",
+                media_type: "application/json",
+            })
+        }
     }
 
     pub fn text(mut self, body: impl Into<String>) -> Self {
@@ -340,13 +354,25 @@ impl RequestBuilder {
     }
 
     pub async fn send_json<T: DeserializeOwned>(self) -> Result<T> {
-        let response = self.builder.send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(Error::Http { status, body });
+        #[cfg(feature = "json")]
+        {
+            let response = self.builder.send().await?;
+            let status = response.status();
+            if !status.is_success() {
+                let body = response.text().await.unwrap_or_default();
+                return Err(Error::Http { status, body });
+            }
+            Ok(response.json::<T>().await?)
         }
-        Ok(response.json::<T>().await?)
+
+        #[cfg(not(feature = "json"))]
+        {
+            let _ = self;
+            Err(Error::UnsupportedMediaType {
+                operation: "response deserialization",
+                media_type: "application/json",
+            })
+        }
     }
 
     pub async fn send_text(self) -> Result<String> {
@@ -411,7 +437,19 @@ impl Response {
     }
 
     pub async fn json<T: DeserializeOwned>(self) -> Result<T> {
-        Ok(self.inner.json::<T>().await?)
+        #[cfg(feature = "json")]
+        {
+            Ok(self.inner.json::<T>().await?)
+        }
+
+        #[cfg(not(feature = "json"))]
+        {
+            let _ = self;
+            Err(Error::UnsupportedMediaType {
+                operation: "response deserialization",
+                media_type: "application/json",
+            })
+        }
     }
 
     pub async fn xml<T: DeserializeOwned>(self) -> Result<T> {

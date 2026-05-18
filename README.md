@@ -51,10 +51,16 @@ async fn example() -> Result<()> {
 }
 ```
 
-Enable XML support with:
+JSON support is enabled by default. Enable XML support with:
 
 ```toml
 catnap = { version = "0.1", features = ["xml"] }
+```
+
+For builds without JSON support:
+
+```toml
+catnap = { version = "0.1", default-features = false }
 ```
 
 ## Current Scope
@@ -67,8 +73,9 @@ This first slice supports:
 - Query parameters with `#[query("name")]`
 - Header parameters with `#[header("Name")]`
 - Media types with `#[consumes("...")]` and `#[produces("...")]`, defaulting to `application/json`
-- JSON request bodies from the first unannotated argument
-- JSON request/response bodies, optional XML request/response bodies, `text/plain` string responses, raw `Response`, and `Result<()>`
+- JSON request/response bodies enabled by the default `json` feature
+- Optional XML request/response bodies with the `xml` feature
+- `text/plain` string responses, raw `Response`, and `Result<()>`
 - Builder configuration for base URL, default headers, redirect handling, timeout, and query parameter style
 
-The design intentionally mirrors MicroProfile's developer experience while staying idiomatic for Rust: explicit async traits, typed `Result`, and serde-powered JSON.
+The design intentionally mirrors MicroProfile's developer experience while staying idiomatic for Rust: explicit async traits, typed `Result`, and feature-gated media support.

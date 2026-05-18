@@ -415,7 +415,7 @@ fn body_for(
 
     match consumes {
         APPLICATION_JSON => Ok(quote! {
-            request = request.content_type(#consumes).json(#arg);
+            request = request.content_type(#consumes).json(#arg)?;
         }),
         APPLICATION_XML | TEXT_XML => Ok(quote! {
             request = request.content_type(#consumes).xml(#arg)?;
