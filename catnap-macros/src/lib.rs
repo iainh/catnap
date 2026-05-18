@@ -290,6 +290,8 @@ fn expand_method(
     let mut header_params = Vec::new();
     let mut body_arg = None;
     let mut path_names = Vec::new();
+    let path_var = format_ident!("__catnap_path");
+    let request_var = format_ident!("__catnap_request");
 
     for input in &mut method.sig.inputs {
         let FnArg::Typed(pat_type) = input else {
@@ -327,7 +329,7 @@ fn expand_method(
             ] => {
                 path_names.push(name.clone());
                 path_replacements.push(quote! {
-                    path = path.replace(
+                    #path_var = #path_var.replace(
                         concat!("{", #name, "}"),
                         &#catnap::__private::encode_path_segment(#arg_ident),
                     );
@@ -341,11 +343,11 @@ fn expand_method(
             ] => {
                 if is_query_collection(&pat_type.ty) {
                     query_params.push(quote! {
-                        request = request.query_params(#name, #arg_ident);
+                        #request_var = #request_var.query_params(#name, #arg_ident);
                     });
                 } else {
                     query_params.push(quote! {
-                        request = request.query_param(#name, #arg_ident);
+                        #request_var = #request_var.query_param(#name, #arg_ident);
                     });
                 }
             }
@@ -356,7 +358,7 @@ fn expand_method(
                 },
             ] => {
                 header_params.push(quote! {
-                    request = request.header(#name, #arg_ident);
+                    #request_var = #request_var.header(#name, #arg_ident);
                 });
             }
             _ => {
@@ -379,17 +381,17 @@ fn expand_method(
 
     let sig = method.sig.clone();
     let output = &sig.output;
-    let body = body_for(catnap, body_arg, &consumes)?;
-    let sender = sender_for(catnap, output, &produces)?;
+    let body = body_for(catnap, &request_var, body_arg, &consumes)?;
+    let sender = sender_for(catnap, &request_var, output, &produces)?;
     let produces = produces.as_str();
     let verb_ident = format_ident!("{}", verb);
 
     Ok(quote! {
         #sig {
-            let mut path = #full_path.to_owned();
+            let mut #path_var = #full_path.to_owned();
             #(#path_replacements)*
-            let mut request = self.inner.request(#catnap::http::Method::#verb_ident, &path)?;
-            request = request.accept(#produces);
+            let mut #request_var = self.inner.request(#catnap::http::Method::#verb_ident, &#path_var)?;
+            #request_var = #request_var.accept(#produces);
             #(#query_params)*
             #(#header_params)*
             #body
@@ -812,6 +814,7 @@ fn pat_ident(pat: &Pat) -> Option<Ident> {
 
 fn body_for(
     catnap: &TokenStream2,
+    request_var: &Ident,
     body_arg: Option<Ident>,
     consumes: &MediaType,
 ) -> syn::Result<TokenStream2> {
@@ -822,13 +825,13 @@ fn body_for(
     let media_type = consumes.as_str();
     match BodyMode::for_media_type(consumes) {
         BodyMode::Json => Ok(quote! {
-            request = request.content_type(#media_type).json(#arg)?;
+            #request_var = #request_var.content_type(#media_type).json(#arg)?;
         }),
         BodyMode::Xml => Ok(quote! {
-            request = request.content_type(#media_type).xml(#arg)?;
+            #request_var = #request_var.content_type(#media_type).xml(#arg)?;
         }),
         BodyMode::Text => Ok(quote! {
-            request = request.content_type(#media_type).text(#arg);
+            #request_var = #request_var.content_type(#media_type).text(#arg);
         }),
         BodyMode::Unsupported => Ok(quote! {
             return Err(#catnap::Error::UnsupportedMediaType {
@@ -859,6 +862,7 @@ impl BodyMode {
 
 fn sender_for(
     catnap: &TokenStream2,
+    request_var: &Ident,
     output: &ReturnType,
     produces: &MediaType,
 ) -> syn::Result<TokenStream2> {
@@ -871,11 +875,11 @@ fn sender_for(
     let inner = result_inner(ty)?;
     let media_type = produces.as_str();
     match ResponseMode::for_return_type(inner, produces) {
-        ResponseMode::Raw => Ok(quote! { request.send().await }),
-        ResponseMode::Empty => Ok(quote! { request.send_empty().await }),
-        ResponseMode::Text => Ok(quote! { request.send_text().await }),
-        ResponseMode::Json(inner) => Ok(quote! { request.send_json::<#inner>().await }),
-        ResponseMode::Xml(inner) => Ok(quote! { request.send_xml::<#inner>().await }),
+        ResponseMode::Raw => Ok(quote! { #request_var.send().await }),
+        ResponseMode::Empty => Ok(quote! { #request_var.send_empty().await }),
+        ResponseMode::Text => Ok(quote! { #request_var.send_text().await }),
+        ResponseMode::Json(inner) => Ok(quote! { #request_var.send_json::<#inner>().await }),
+        ResponseMode::Xml(inner) => Ok(quote! { #request_var.send_xml::<#inner>().await }),
         ResponseMode::Unsupported => Ok(quote! {
             Err(#catnap::Error::UnsupportedMediaType {
                 operation: #catnap::MediaOperation::ResponseDeserialization,

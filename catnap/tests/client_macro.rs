@@ -58,6 +58,13 @@ trait Users {
 
     #[get("/{id}/inferred")]
     async fn inferred(&self, #[path()] id: &str, #[query()] include: &str) -> Result<Response>;
+
+    #[get("/{path}/shadow")]
+    async fn shadowed_names(
+        &self,
+        #[path()] path: &str,
+        #[query()] request: &str,
+    ) -> Result<Response>;
 }
 
 #[rest_client]
@@ -223,6 +230,26 @@ async fn generated_client_infers_path_and_query_names() -> Result<()> {
     assert_eq!(
         request.line,
         "GET /users/42/inferred?include=roles HTTP/1.1"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn generated_client_handles_parameters_named_like_generated_locals() -> Result<()> {
+    let server = TestServer::spawn("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n");
+
+    let client = UsersClient::builder()
+        .base_url(server.base_url())?
+        .build()?;
+
+    let response = client.shadowed_names("a/b", "trace").await?;
+
+    let request = server.request();
+    assert_eq!(response.status(), catnap::http::StatusCode::NO_CONTENT);
+    assert_eq!(
+        request.line,
+        "GET /users/a%2Fb/shadow?request=trace HTTP/1.1"
     );
 
     Ok(())
