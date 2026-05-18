@@ -3,6 +3,8 @@ use catnap::{Result, rest_client};
 use catnap::{get, path};
 use serde::Deserialize;
 
+mod support;
+
 #[derive(Debug, Deserialize)]
 struct BasicAuthResponse {
     authorized: bool,
@@ -21,6 +23,8 @@ trait HttpBin {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    support::init_tracing();
+
     let client = HttpBinClient::builder()
         .base_url("https://httpbin.io")?
         .basic_auth("catnap", "secret")?

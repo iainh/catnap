@@ -2,6 +2,8 @@ use catnap::{Response, Result, rest_client};
 #[allow(unused_imports)]
 use catnap::{get, path};
 
+mod support;
+
 #[rest_client]
 trait HttpBin {
     #[get("/status/{code}")]
@@ -10,6 +12,8 @@ trait HttpBin {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    support::init_tracing();
+
     let client = HttpBinClient::builder()
         .base_url("https://httpbin.io")?
         .build()?;

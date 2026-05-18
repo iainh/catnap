@@ -101,6 +101,9 @@ pub enum Error {
     },
     #[error("request failed: {0}")]
     Request(#[from] reqwest::Error),
+    #[cfg(feature = "json")]
+    #[error("JSON deserialization failed: {0}")]
+    JsonDeserialize(#[from] serde_json::Error),
     #[cfg(feature = "xml")]
     #[error("XML deserialization failed: {0}")]
     XmlDeserialize(#[from] quick_xml::de::DeError),
@@ -359,7 +362,7 @@ impl RequestBuilder {
         }
     }
 
-    async fn send_raw(self) -> Result<reqwest::Response> {
+    async fn send_raw(self) -> Result<BufferedResponse> {
         if let Some(builder) = self.builder.try_clone() {
             match builder.build() {
                 Ok(request) => {
@@ -367,6 +370,7 @@ impl RequestBuilder {
                         method = %request.method(),
                         url = %request.url(),
                         headers = ?LoggedHeaders(request.headers()),
+                        body = ?request.body().and_then(reqwest::Body::as_bytes).map(LoggedBody),
                         "sending HTTP request"
                     );
                 }
@@ -379,13 +383,22 @@ impl RequestBuilder {
         }
 
         let response = self.builder.send().await?;
+        let status = response.status();
+        let url = response.url().clone();
+        let headers = response.headers().clone();
+        let body = response.bytes().await?.to_vec();
         debug!(
-            status = %response.status(),
-            url = %response.url(),
-            headers = ?LoggedHeaders(response.headers()),
+            status = %status,
+            url = %url,
+            headers = ?LoggedHeaders(&headers),
+            body = ?LoggedBody(&body),
             "received HTTP response"
         );
-        Ok(response)
+        Ok(BufferedResponse {
+            status,
+            headers,
+            body,
+        })
     }
 
     pub async fn send(self) -> Result<Response> {
@@ -397,12 +410,12 @@ impl RequestBuilder {
         #[cfg(feature = "json")]
         {
             let response = self.send_raw().await?;
-            let status = response.status();
+            let status = response.status;
             if !status.is_success() {
-                let body = response.text().await.unwrap_or_default();
+                let body = response.body_text();
                 return Err(Error::Http { status, body });
             }
-            Ok(response.json::<T>().await?)
+            Ok(serde_json::from_slice(&response.body)?)
         }
 
         #[cfg(not(feature = "json"))]
@@ -417,20 +430,20 @@ impl RequestBuilder {
 
     pub async fn send_text(self) -> Result<String> {
         let response = self.send_raw().await?;
-        let status = response.status();
+        let status = response.status;
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
+            let body = response.body_text();
             return Err(Error::Http { status, body });
         }
-        Ok(response.text().await?)
+        Ok(response.body_text())
     }
 
     pub async fn send_xml<T: DeserializeOwned>(self) -> Result<T> {
         #[cfg(feature = "xml")]
         {
             let response = self.send_raw().await?;
-            let status = response.status();
-            let body = response.text().await?;
+            let status = response.status;
+            let body = response.body_text();
             if !status.is_success() {
                 return Err(Error::Http { status, body });
             }
@@ -449,9 +462,9 @@ impl RequestBuilder {
 
     pub async fn send_empty(self) -> Result<()> {
         let response = self.send_raw().await?;
-        let status = response.status();
+        let status = response.status;
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
+            let body = response.body_text();
             return Err(Error::Http { status, body });
         }
         Ok(())
@@ -478,28 +491,51 @@ fn is_sensitive_header(name: &HeaderName) -> bool {
     name == AUTHORIZATION || name == PROXY_AUTHORIZATION || name == COOKIE || name == SET_COOKIE
 }
 
+struct LoggedBody<'a>(&'a [u8]);
+
+impl std::fmt::Debug for LoggedBody<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match std::str::from_utf8(self.0) {
+            Ok(body) => formatter.write_str(body),
+            Err(_) => write!(formatter, "<{} non-UTF-8 bytes>", self.0.len()),
+        }
+    }
+}
+
+struct BufferedResponse {
+    status: StatusCode,
+    headers: HeaderMap,
+    body: Vec<u8>,
+}
+
+impl BufferedResponse {
+    fn body_text(self) -> String {
+        String::from_utf8_lossy(&self.body).into_owned()
+    }
+}
+
 /// Raw response wrapper for callers that need headers, status, or custom body handling.
 pub struct Response {
-    inner: reqwest::Response,
+    inner: BufferedResponse,
 }
 
 impl Response {
     pub fn status(&self) -> StatusCode {
-        self.inner.status()
+        self.inner.status
     }
 
     pub fn headers(&self) -> &HeaderMap {
-        self.inner.headers()
+        &self.inner.headers
     }
 
     pub async fn text(self) -> Result<String> {
-        Ok(self.inner.text().await?)
+        Ok(self.inner.body_text())
     }
 
     pub async fn json<T: DeserializeOwned>(self) -> Result<T> {
         #[cfg(feature = "json")]
         {
-            Ok(self.inner.json::<T>().await?)
+            Ok(serde_json::from_slice(&self.inner.body)?)
         }
 
         #[cfg(not(feature = "json"))]
@@ -515,7 +551,7 @@ impl Response {
     pub async fn xml<T: DeserializeOwned>(self) -> Result<T> {
         #[cfg(feature = "xml")]
         {
-            Ok(quick_xml::de::from_str(&self.inner.text().await?)?)
+            Ok(quick_xml::de::from_str(&self.inner.body_text())?)
         }
 
         #[cfg(not(feature = "xml"))]

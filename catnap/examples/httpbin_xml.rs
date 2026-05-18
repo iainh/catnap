@@ -3,6 +3,8 @@ use catnap::{Result, rest_client};
 use catnap::{get, produces};
 use serde::Deserialize;
 
+mod support;
+
 #[derive(Debug, Deserialize)]
 struct Slideshow {
     #[serde(rename = "@title")]
@@ -26,6 +28,8 @@ trait HttpBin {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    support::init_tracing();
+
     let client = HttpBinClient::builder()
         .base_url("https://httpbin.io")?
         .build()?;
