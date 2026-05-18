@@ -406,8 +406,8 @@ cargo run -p catnap --example httpbin_basic_auth
 cargo run -p catnap --features xml --example httpbin_xml
 ```
 
-Examples initialize a `tracing-subscriber` logger. Set `RUST_LOG` to override
-the default `catnap=debug` filter.
+Examples initialize a small `tracing-subscriber` logger with debug output
+enabled.
 
 ## Current scope
 

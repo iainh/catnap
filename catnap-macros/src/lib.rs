@@ -1,5 +1,4 @@
 use proc_macro::TokenStream;
-use proc_macro_crate::{FoundCrate, crate_name};
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::{
@@ -205,14 +204,7 @@ fn expand_rest_client(args: RestClientArgs, trait_item: &mut ItemTrait) -> Token
 }
 
 fn catnap_crate_path() -> TokenStream2 {
-    match crate_name("catnap") {
-        Ok(FoundCrate::Itself) => quote!(::catnap),
-        Ok(FoundCrate::Name(name)) => {
-            let ident = Ident::new(&name, proc_macro2::Span::call_site());
-            quote!(::#ident)
-        }
-        Err(_) => quote!(::catnap),
-    }
+    quote!(::catnap)
 }
 
 fn expand_method(

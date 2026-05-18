@@ -131,14 +131,12 @@ use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use reqwest::redirect::Policy;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use std::fmt::Display;
+use std::error::Error as StdError;
+use std::fmt::{self, Display};
 use std::marker::PhantomData;
 use std::time::Duration;
 use tracing::{Level, debug};
 use url::Url;
-
-#[cfg(feature = "basic-auth")]
-use base64::Engine;
 
 /// Result type returned by generated clients and runtime helpers.
 pub type Result<T> = std::result::Result<T, Error>;
@@ -166,37 +164,29 @@ pub mod __private {
 }
 
 /// Error type returned while building or invoking a generated REST client.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum Error {
     /// A generated client was built without configuring a base URL.
-    #[error("base URL is required")]
     MissingBaseUrl,
     /// The configured base URL could not be parsed.
-    #[error("invalid base URL: {0}")]
-    InvalidBaseUrl(#[from] url::ParseError),
+    InvalidBaseUrl(url::ParseError),
     /// A request path could not be joined to the configured base URL.
-    #[error("invalid request URL path `{path}`: {source}")]
     InvalidRequestUrl {
         /// The path passed to the runtime request builder.
         path: String,
-        #[source]
         /// The URL parse error produced while joining the path.
         source: url::ParseError,
     },
     /// A configured default header name was invalid.
-    #[error("invalid HTTP header name `{0}`")]
     InvalidHeaderName(String),
     /// A configured default header value was invalid.
-    #[error("invalid HTTP header value for `{name}`: {source}")]
     InvalidHeaderValue {
         /// Header name associated with the invalid value.
         name: String,
-        #[source]
         /// The invalid header value error.
         source: http::header::InvalidHeaderValue,
     },
     /// The selected request or response media type is not supported.
-    #[error("unsupported media type `{media_type}` for {operation}")]
     UnsupportedMediaType {
         /// The operation that required media type support.
         operation: &'static str,
@@ -204,30 +194,119 @@ pub enum Error {
         media_type: &'static str,
     },
     /// The underlying `reqwest` request failed.
-    #[error("request failed: {0}")]
-    Request(#[from] reqwest::Error),
+    Request(reqwest::Error),
     /// JSON response deserialization failed.
     #[cfg(feature = "json")]
-    #[error("JSON deserialization failed: {0}")]
-    JsonDeserialize(#[from] serde_json::Error),
+    JsonDeserialize(serde_json::Error),
     /// XML response deserialization failed.
     #[cfg(feature = "xml")]
-    #[error("XML deserialization failed: {0}")]
-    XmlDeserialize(#[from] quick_xml::de::DeError),
+    XmlDeserialize(quick_xml::de::DeError),
     /// XML request serialization failed.
     #[cfg(feature = "xml")]
-    #[error("XML serialization failed: {0}")]
-    XmlSerialize(#[from] quick_xml::se::SeError),
+    XmlSerialize(quick_xml::se::SeError),
     /// A typed request returned a non-success HTTP status.
     ///
     /// Methods returning [`Response`] leave status handling to the caller.
-    #[error("HTTP {status}: {body}")]
     Http {
         /// The non-success HTTP status.
         status: StatusCode,
         /// The response body decoded as UTF-8 lossily.
         body: String,
     },
+}
+
+impl Display for Error {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingBaseUrl => formatter.write_str("base URL is required"),
+            Self::InvalidBaseUrl(source) => write!(formatter, "invalid base URL: {source}"),
+            Self::InvalidRequestUrl { path, source } => {
+                write!(formatter, "invalid request URL path `{path}`: {source}")
+            }
+            Self::InvalidHeaderName(name) => write!(formatter, "invalid HTTP header name `{name}`"),
+            Self::InvalidHeaderValue { name, source } => {
+                write!(
+                    formatter,
+                    "invalid HTTP header value for `{name}`: {source}"
+                )
+            }
+            Self::UnsupportedMediaType {
+                operation,
+                media_type,
+            } => {
+                write!(
+                    formatter,
+                    "unsupported media type `{media_type}` for {operation}"
+                )
+            }
+            Self::Request(source) => write!(formatter, "request failed: {source}"),
+            #[cfg(feature = "json")]
+            Self::JsonDeserialize(source) => {
+                write!(formatter, "JSON deserialization failed: {source}")
+            }
+            #[cfg(feature = "xml")]
+            Self::XmlDeserialize(source) => {
+                write!(formatter, "XML deserialization failed: {source}")
+            }
+            #[cfg(feature = "xml")]
+            Self::XmlSerialize(source) => write!(formatter, "XML serialization failed: {source}"),
+            Self::Http { status, body } => write!(formatter, "HTTP {status}: {body}"),
+        }
+    }
+}
+
+impl StdError for Error {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        match self {
+            Self::InvalidBaseUrl(source) => Some(source),
+            Self::InvalidRequestUrl { source, .. } => Some(source),
+            Self::InvalidHeaderValue { source, .. } => Some(source),
+            Self::Request(source) => Some(source),
+            #[cfg(feature = "json")]
+            Self::JsonDeserialize(source) => Some(source),
+            #[cfg(feature = "xml")]
+            Self::XmlDeserialize(source) => Some(source),
+            #[cfg(feature = "xml")]
+            Self::XmlSerialize(source) => Some(source),
+            Self::MissingBaseUrl
+            | Self::InvalidHeaderName(_)
+            | Self::UnsupportedMediaType { .. }
+            | Self::Http { .. } => None,
+        }
+    }
+}
+
+impl From<url::ParseError> for Error {
+    fn from(source: url::ParseError) -> Self {
+        Self::InvalidBaseUrl(source)
+    }
+}
+
+impl From<reqwest::Error> for Error {
+    fn from(source: reqwest::Error) -> Self {
+        Self::Request(source)
+    }
+}
+
+#[cfg(feature = "json")]
+impl From<serde_json::Error> for Error {
+    fn from(source: serde_json::Error) -> Self {
+        Self::JsonDeserialize(source)
+    }
+}
+
+#[cfg(feature = "xml")]
+impl From<quick_xml::de::DeError> for Error {
+    fn from(source: quick_xml::de::DeError) -> Self {
+        Self::XmlDeserialize(source)
+    }
+}
+
+#[cfg(feature = "xml")]
+impl From<quick_xml::se::SeError> for Error {
+    fn from(source: quick_xml::se::SeError) -> Self {
+        Self::XmlSerialize(source)
+    }
 }
 
 /// How repeated query parameters should be encoded.
@@ -303,7 +382,7 @@ impl<T> RestClientBuilder<T> {
     #[cfg(feature = "basic-auth")]
     pub fn basic_auth(self, username: impl AsRef<str>, password: impl AsRef<str>) -> Result<Self> {
         let credentials = format!("{}:{}", username.as_ref(), password.as_ref());
-        let encoded = base64::engine::general_purpose::STANDARD.encode(credentials);
+        let encoded = base64_standard(credentials.as_bytes());
         self.header("Authorization", format!("Basic {encoded}"))
     }
 
@@ -337,6 +416,35 @@ where
     pub fn build(self) -> Result<T> {
         T::build_from_config(self.config)
     }
+}
+
+#[cfg(feature = "basic-auth")]
+fn base64_standard(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let first = chunk[0];
+        let second = chunk.get(1).copied().unwrap_or(0);
+        let third = chunk.get(2).copied().unwrap_or(0);
+
+        encoded.push(TABLE[(first >> 2) as usize] as char);
+        encoded.push(TABLE[(((first & 0b0000_0011) << 4) | (second >> 4)) as usize] as char);
+
+        if chunk.len() > 1 {
+            encoded.push(TABLE[(((second & 0b0000_1111) << 2) | (third >> 6)) as usize] as char);
+        } else {
+            encoded.push('=');
+        }
+
+        if chunk.len() > 2 {
+            encoded.push(TABLE[(third & 0b0011_1111) as usize] as char);
+        } else {
+            encoded.push('=');
+        }
+    }
+
+    encoded
 }
 
 /// Implemented by generated client structs.
