@@ -242,12 +242,14 @@ fn expand_rest_client(args: RestClientArgs, trait_item: &mut ItemTrait) -> Token
             inner: #catnap::RestClient,
         }
 
+        #[automatically_derived]
         impl #client_ident {
             pub fn builder() -> #catnap::RestClientBuilder<Self> {
                 #catnap::RestClientBuilder::new()
             }
         }
 
+        #[automatically_derived]
         impl #catnap::BuildFromConfig for #client_ident {
             fn build_from_config(config: #catnap::RestClientConfig) -> #catnap::Result<Self> {
                 Ok(Self {
@@ -256,6 +258,7 @@ fn expand_rest_client(args: RestClientArgs, trait_item: &mut ItemTrait) -> Token
             }
         }
 
+        #[automatically_derived]
         impl #trait_ident for #client_ident {
             #(#impl_methods)*
         }
