@@ -180,7 +180,7 @@ fn expand_method(base_path: &str, method: &mut TraitItemFn) -> TokenStream2 {
         #sig {
             let mut path = #full_path.to_owned();
             #(#path_replacements)*
-            let mut request = self.inner.request(::catnap::http::Method::#verb_ident, &path);
+            let mut request = self.inner.request(::catnap::http::Method::#verb_ident, &path)?;
             #(#query_params)*
             #(#header_params)*
             #body

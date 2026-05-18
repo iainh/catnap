@@ -50,6 +50,12 @@ pub enum Error {
     MissingBaseUrl,
     #[error("invalid base URL: {0}")]
     InvalidBaseUrl(#[from] url::ParseError),
+    #[error("invalid request URL path `{path}`: {source}")]
+    InvalidRequestUrl {
+        path: String,
+        #[source]
+        source: url::ParseError,
+    },
     #[error("invalid HTTP header name `{0}`")]
     InvalidHeaderName(String),
     #[error("invalid HTTP header value for `{name}`: {source}")]
@@ -189,15 +195,19 @@ impl RestClient {
         })
     }
 
-    pub fn request(&self, method: Method, path: &str) -> RequestBuilder {
-        let url = self.base_url.join(path.trim_start_matches('/'));
-        RequestBuilder {
-            builder: self
-                .client
-                .request(method, url.unwrap_or_else(|_| self.base_url.clone())),
+    pub fn request(&self, method: Method, path: &str) -> Result<RequestBuilder> {
+        let url = self
+            .base_url
+            .join(path.trim_start_matches('/'))
+            .map_err(|source| Error::InvalidRequestUrl {
+                path: path.to_owned(),
+                source,
+            })?;
+        Ok(RequestBuilder {
+            builder: self.client.request(method, url),
             query_param_style: self.query_param_style,
         }
-        .headers(self.default_headers.clone())
+        .headers(self.default_headers.clone()))
     }
 }
 
@@ -312,5 +322,21 @@ mod tests {
             .expect_err("missing base URL should fail");
 
         assert!(matches!(err, Error::MissingBaseUrl));
+    }
+
+    #[test]
+    fn request_reports_invalid_url_paths() {
+        let client = RestClient::from_config(RestClientConfig {
+            base_url: Some(Url::parse("https://example.com").expect("valid base URL")),
+            ..RestClientConfig::default()
+        })
+        .expect("client should build");
+
+        let err = match client.request(Method::GET, "https://[") {
+            Ok(_) => panic!("invalid request path should fail"),
+            Err(err) => err,
+        };
+
+        assert!(matches!(err, Error::InvalidRequestUrl { .. }));
     }
 }
