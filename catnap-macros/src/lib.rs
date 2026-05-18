@@ -3,7 +3,7 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::{
     Attribute, FnArg, Ident, ItemTrait, LitStr, Pat, ReturnType, TraitItem, TraitItemFn, Type,
-    parse_macro_input,
+    parse_macro_input, spanned::Spanned,
 };
 
 /// Generates a reqwest-backed client implementation for an annotated trait.
@@ -108,14 +108,27 @@ impl syn::parse::Parse for RestClientArgs {
             return Ok(args);
         }
 
+        let mut seen_path = false;
+        let mut seen_consumes = false;
+        let mut seen_produces = false;
+
         while !input.is_empty() {
             let key: Ident = input.parse()?;
             input.parse::<syn::Token![=]>()?;
             let value: LitStr = input.parse()?;
             match key.to_string().as_str() {
-                "path" => args.path = value.value(),
-                "consumes" => args.consumes = validate_media_type(&value)?,
-                "produces" => args.produces = validate_media_type(&value)?,
+                "path" => {
+                    reject_duplicate_arg(&mut seen_path, &key)?;
+                    args.path = validate_path_template_lit(&value)?;
+                }
+                "consumes" => {
+                    reject_duplicate_arg(&mut seen_consumes, &key)?;
+                    args.consumes = validate_media_type_lit(&value)?;
+                }
+                "produces" => {
+                    reject_duplicate_arg(&mut seen_produces, &key)?;
+                    args.produces = validate_media_type_lit(&value)?;
+                }
                 _ => {
                     return Err(syn::Error::new(
                         key.span(),
@@ -130,6 +143,17 @@ impl syn::parse::Parse for RestClientArgs {
         }
         Ok(args)
     }
+}
+
+fn reject_duplicate_arg(seen: &mut bool, key: &Ident) -> syn::Result<()> {
+    if *seen {
+        return Err(syn::Error::new(
+            key.span(),
+            format!("duplicate `{key}` argument"),
+        ));
+    }
+    *seen = true;
+    Ok(())
 }
 
 const APPLICATION_JSON: &str = "application/json";
@@ -212,6 +236,8 @@ fn expand_method(
     trait_config: &ResourceConfig,
     method: &mut TraitItemFn,
 ) -> syn::Result<TokenStream2> {
+    validate_method_signature(method)?;
+
     let (verb, method_path) = take_http_attr(&mut method.attrs)?.ok_or_else(|| {
         syn::Error::new_spanned(
             &method.sig.ident,
@@ -234,32 +260,78 @@ fn expand_method(
         let FnArg::Typed(pat_type) = input else {
             continue;
         };
-        let arg_ident = pat_ident(&pat_type.pat);
-        let Some(arg_ident) = arg_ident else {
-            continue;
-        };
-        if let Some(name) = take_named_attr(&mut pat_type.attrs, "path") {
-            path_param_names.push(name.clone());
-            path_replacements.push(quote! {
-                path = path.replace(
-                    concat!("{", #name, "}"),
-                    &#catnap::__private::encode_path_segment(#arg_ident),
-                );
-            });
-        } else if let Some(name) = take_named_attr(&mut pat_type.attrs, "query") {
-            query_params.push(quote! {
-                request = request.query_param(#name, #arg_ident);
-            });
-        } else if let Some(name) = take_named_attr(&mut pat_type.attrs, "header") {
-            header_params.push(quote! {
-                request = request.header(#name, #arg_ident);
-            });
-        } else if body_arg.replace(arg_ident).is_some() {
-            return Err(syn::Error::new_spanned(
-                pat_type,
-                "REST client methods may have at most one unannotated body argument",
-            ));
+
+        let arg_ident = pat_ident(&pat_type.pat).ok_or_else(|| {
+            syn::Error::new_spanned(
+                &pat_type.pat,
+                "REST client method parameters must use simple identifier patterns",
+            )
+        })?;
+
+        let bindings = take_parameter_attrs(&mut pat_type.attrs)?;
+        match bindings.as_slice() {
+            [] => {
+                if matches!(verb.as_str(), "GET" | "HEAD") {
+                    return Err(syn::Error::new_spanned(
+                        pat_type,
+                        "GET and HEAD REST client methods cannot have request body arguments",
+                    ));
+                }
+                if body_arg.replace(arg_ident).is_some() {
+                    return Err(syn::Error::new_spanned(
+                        pat_type,
+                        "REST client methods may have at most one unannotated body argument",
+                    ));
+                }
+            }
+            [
+                ParameterAttr {
+                    kind: ParameterAttrKind::Path,
+                    name,
+                },
+            ] => {
+                path_param_names.push(name.clone());
+                path_replacements.push(quote! {
+                    path = path.replace(
+                        concat!("{", #name, "}"),
+                        &#catnap::__private::encode_path_segment(#arg_ident),
+                    );
+                });
+            }
+            [
+                ParameterAttr {
+                    kind: ParameterAttrKind::Query,
+                    name,
+                },
+            ] => {
+                query_params.push(quote! {
+                    request = request.query_param(#name, #arg_ident);
+                });
+            }
+            [
+                ParameterAttr {
+                    kind: ParameterAttrKind::Header,
+                    name,
+                },
+            ] => {
+                header_params.push(quote! {
+                    request = request.header(#name, #arg_ident);
+                });
+            }
+            _ => {
+                return Err(syn::Error::new_spanned(
+                    pat_type,
+                    "REST client method parameters may have only one of #[path], #[query], or #[header]",
+                ));
+            }
         }
+    }
+
+    if has_duplicate(&path_param_names) {
+        return Err(syn::Error::new_spanned(
+            &method.sig.ident,
+            "REST client path parameter names must be unique",
+        ));
     }
 
     validate_path_params(&full_path, &path_param_names, method)?;
@@ -284,6 +356,61 @@ fn expand_method(
     })
 }
 
+fn validate_method_signature(method: &TraitItemFn) -> syn::Result<()> {
+    if method.sig.asyncness.is_none() {
+        return Err(syn::Error::new_spanned(
+            &method.sig.ident,
+            "REST client methods must be async",
+        ));
+    }
+
+    if method.default.is_some() {
+        return Err(syn::Error::new_spanned(
+            &method.sig.ident,
+            "REST client methods must not define a default body",
+        ));
+    }
+
+    if method.sig.constness.is_some()
+        || method.sig.unsafety.is_some()
+        || method.sig.abi.is_some()
+        || !method.sig.generics.params.is_empty()
+    {
+        return Err(syn::Error::new_spanned(
+            &method.sig.ident,
+            "REST client methods must be non-generic safe async trait methods",
+        ));
+    }
+
+    let mut inputs = method.sig.inputs.iter();
+    let Some(first) = inputs.next() else {
+        return Err(syn::Error::new_spanned(
+            &method.sig.ident,
+            "REST client methods must take &self as the first parameter",
+        ));
+    };
+
+    let FnArg::Receiver(receiver) = first else {
+        return Err(syn::Error::new_spanned(
+            first,
+            "REST client methods must take &self as the first parameter",
+        ));
+    };
+
+    if receiver.reference.is_none()
+        || receiver.mutability.is_some()
+        || !receiver.attrs.is_empty()
+        || receiver.colon_token.is_some()
+    {
+        return Err(syn::Error::new_spanned(
+            receiver,
+            "REST client methods must take &self, not self or &mut self",
+        ));
+    }
+
+    Ok(())
+}
+
 fn take_http_attr(attrs: &mut Vec<Attribute>) -> syn::Result<Option<(String, String)>> {
     let mut found = None;
     let mut index = 0;
@@ -291,7 +418,7 @@ fn take_http_attr(attrs: &mut Vec<Attribute>) -> syn::Result<Option<(String, Str
         let attr = &attrs[index];
         let Some(verb) = ["get", "post", "put", "patch", "delete", "options", "head"]
             .into_iter()
-            .find(|verb| attr.path().is_ident(verb))
+            .find(|verb| is_catnap_attr(attr, verb))
         else {
             index += 1;
             continue;
@@ -304,10 +431,8 @@ fn take_http_attr(attrs: &mut Vec<Attribute>) -> syn::Result<Option<(String, Str
             ));
         }
 
-        let path = attr
-            .parse_args::<LitStr>()
-            .map(|lit| lit.value())
-            .unwrap_or_default();
+        let path = parse_optional_string_arg(attr, "HTTP method attributes")?.unwrap_or_default();
+        validate_path_template(&path, attr.span())?;
         attrs.remove(index);
         found = Some((verb.to_uppercase(), path));
     }
@@ -322,37 +447,211 @@ struct ResourceConfig {
 }
 
 fn take_media_type_attr(attrs: &mut Vec<Attribute>, name: &str) -> syn::Result<Option<String>> {
-    let Some((index, attr)) = attrs
-        .iter()
-        .enumerate()
-        .find(|(_, attr)| attr.path().is_ident(name))
-    else {
+    let matches = matching_attr_indices(attrs, name);
+    let Some(first_index) = matches.first().copied() else {
         return Ok(None);
     };
+    if matches.len() > 1 {
+        return Err(syn::Error::new_spanned(
+            &attrs[matches[1]],
+            format!("REST client methods may have only one #[{name}] attribute"),
+        ));
+    }
 
-    let value = validate_media_type(&attr.parse_args::<LitStr>()?)?;
-    attrs.remove(index);
+    let value = validate_media_type(
+        &parse_required_string_arg(&attrs[first_index], name)?,
+        attrs[first_index].span(),
+    )?;
+    attrs.remove(first_index);
     Ok(Some(value))
 }
 
-fn validate_media_type(lit: &LitStr) -> syn::Result<String> {
+#[derive(Debug)]
+struct ParameterAttr {
+    kind: ParameterAttrKind,
+    name: String,
+}
+
+#[derive(Debug)]
+enum ParameterAttrKind {
+    Path,
+    Query,
+    Header,
+}
+
+fn take_parameter_attrs(attrs: &mut Vec<Attribute>) -> syn::Result<Vec<ParameterAttr>> {
+    let mut bindings = Vec::new();
+    let mut remove_indices = Vec::new();
+
+    for (index, attr) in attrs.iter().enumerate() {
+        let Some(kind) = parameter_attr_kind(attr) else {
+            continue;
+        };
+        let name = parse_required_string_arg(attr, kind.name())?;
+        validate_parameter_name(attr, &name, kind.name())?;
+        if matches!(kind, ParameterAttrKind::Header) {
+            validate_header_name(attr, &name)?;
+        }
+        bindings.push(ParameterAttr { kind, name });
+        remove_indices.push(index);
+    }
+
+    for index in remove_indices.into_iter().rev() {
+        attrs.remove(index);
+    }
+
+    Ok(bindings)
+}
+
+impl ParameterAttrKind {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Path => "path",
+            Self::Query => "query",
+            Self::Header => "header",
+        }
+    }
+}
+
+fn parameter_attr_kind(attr: &Attribute) -> Option<ParameterAttrKind> {
+    if is_catnap_attr(attr, "path") {
+        Some(ParameterAttrKind::Path)
+    } else if is_catnap_attr(attr, "query") {
+        Some(ParameterAttrKind::Query)
+    } else if is_catnap_attr(attr, "header") {
+        Some(ParameterAttrKind::Header)
+    } else {
+        None
+    }
+}
+
+fn matching_attr_indices(attrs: &[Attribute], name: &str) -> Vec<usize> {
+    attrs
+        .iter()
+        .enumerate()
+        .filter_map(|(index, attr)| is_catnap_attr(attr, name).then_some(index))
+        .collect()
+}
+
+fn is_catnap_attr(attr: &Attribute, name: &str) -> bool {
+    let path = attr.path();
+    if path.is_ident(name) {
+        return true;
+    }
+
+    path.leading_colon.is_none()
+        && path.segments.len() == 2
+        && path.segments[0].ident == "catnap"
+        && path.segments[1].ident == name
+}
+
+fn parse_optional_string_arg(
+    attr: &Attribute,
+    description: &'static str,
+) -> syn::Result<Option<String>> {
+    attr.parse_args_with(|input: syn::parse::ParseStream<'_>| {
+        if input.is_empty() {
+            return Ok(None);
+        }
+
+        let value: LitStr = input.parse()?;
+        if !input.is_empty() {
+            return Err(input.error(format!("{description} accept at most one string literal")));
+        }
+        Ok(Some(value.value()))
+    })
+}
+
+fn parse_required_string_arg(attr: &Attribute, name: &str) -> syn::Result<String> {
+    attr.parse_args_with(|input: syn::parse::ParseStream<'_>| {
+        if input.is_empty() {
+            return Err(input.error(format!("#[{name}] requires a string literal argument")));
+        }
+
+        let value: LitStr = input.parse()?;
+        if !input.is_empty() {
+            return Err(input.error(format!("#[{name}] accepts exactly one string literal")));
+        }
+        Ok(value.value())
+    })
+}
+
+fn validate_parameter_name(attr: &Attribute, value: &str, name: &str) -> syn::Result<()> {
+    if value.is_empty() {
+        return Err(syn::Error::new_spanned(
+            attr,
+            format!("#[{name}] parameter names must not be empty"),
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_header_name(attr: &Attribute, value: &str) -> syn::Result<()> {
+    if !value.bytes().all(is_header_name_byte) {
+        return Err(syn::Error::new_spanned(
+            attr,
+            format!("#[header] value `{value}` is not a valid HTTP header name"),
+        ));
+    }
+
+    Ok(())
+}
+
+fn is_header_name_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'!' | b'#'
+                | b'$'
+                | b'%'
+                | b'&'
+                | b'\''
+                | b'*'
+                | b'+'
+                | b'-'
+                | b'.'
+                | b'^'
+                | b'_'
+                | b'`'
+                | b'|'
+                | b'~'
+        )
+}
+
+fn validate_path_template_lit(lit: &LitStr) -> syn::Result<String> {
     let value = lit.value();
-    let (kind, subtype) = value.split_once('/').ok_or_else(|| {
-        syn::Error::new_spanned(lit, "media types must use `type/subtype` syntax")
-    })?;
+    validate_path_template(&value, lit.span())?;
+    Ok(value)
+}
+
+fn validate_path_template(value: &str, span: proc_macro2::Span) -> syn::Result<()> {
+    path_placeholders(value)
+        .map(|_| ())
+        .map_err(|message| syn::Error::new(span, format!("invalid REST client path: {message}")))
+}
+
+fn validate_media_type_lit(lit: &LitStr) -> syn::Result<String> {
+    validate_media_type(&lit.value(), lit.span())
+}
+
+fn validate_media_type(value: &str, span: proc_macro2::Span) -> syn::Result<String> {
+    let (kind, subtype) = value
+        .split_once('/')
+        .ok_or_else(|| syn::Error::new(span, "media types must use `type/subtype` syntax"))?;
 
     if kind.is_empty()
         || subtype.is_empty()
         || value.chars().any(char::is_whitespace)
         || kind.contains(';')
     {
-        return Err(syn::Error::new_spanned(
-            lit,
+        return Err(syn::Error::new(
+            span,
             "media types must be non-empty `type/subtype` values without whitespace",
         ));
     }
 
-    Ok(value)
+    Ok(value.to_owned())
 }
 
 fn validate_path_params(
@@ -360,7 +659,20 @@ fn validate_path_params(
     path_param_names: &[String],
     method: &TraitItemFn,
 ) -> syn::Result<()> {
-    let placeholders = path_placeholders(full_path);
+    let placeholders = path_placeholders(full_path).map_err(|message| {
+        syn::Error::new_spanned(
+            &method.sig.ident,
+            format!("invalid REST client path: {message}"),
+        )
+    })?;
+
+    if has_duplicate(&placeholders) {
+        return Err(syn::Error::new_spanned(
+            &method.sig.ident,
+            "REST client path placeholders must be unique",
+        ));
+    }
+
     for placeholder in &placeholders {
         if !path_param_names.iter().any(|name| name == placeholder) {
             return Err(syn::Error::new_spanned(
@@ -382,33 +694,71 @@ fn validate_path_params(
     Ok(())
 }
 
-fn path_placeholders(path: &str) -> Vec<String> {
+fn path_placeholders(path: &str) -> Result<Vec<String>, String> {
     let mut placeholders = Vec::new();
-    let mut rest = path;
-    while let Some(start) = rest.find('{') {
-        rest = &rest[start + 1..];
-        let Some(end) = rest.find('}') else {
-            break;
-        };
-        placeholders.push(rest[..end].to_owned());
-        rest = &rest[end + 1..];
+    let mut chars = path.char_indices().peekable();
+
+    while let Some((index, ch)) = chars.next() {
+        match ch {
+            '{' => {
+                let start = index + ch.len_utf8();
+                let mut end = None;
+                for (next_index, next_ch) in chars.by_ref() {
+                    match next_ch {
+                        '{' => return Err("nested `{` in path placeholder".to_owned()),
+                        '}' => {
+                            end = Some(next_index);
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+
+                let Some(end) = end else {
+                    return Err("unclosed `{` in path placeholder".to_owned());
+                };
+                let placeholder = &path[start..end];
+                validate_path_placeholder(placeholder)?;
+                placeholders.push(placeholder.to_owned());
+            }
+            '}' => return Err("unmatched `}` in path".to_owned()),
+            _ => {}
+        }
     }
-    placeholders
+
+    Ok(placeholders)
 }
 
-fn take_named_attr(attrs: &mut Vec<Attribute>, name: &str) -> Option<String> {
-    let (index, attr) = attrs
+fn validate_path_placeholder(placeholder: &str) -> Result<(), String> {
+    if placeholder.is_empty() {
+        return Err("path placeholders must not be empty".to_owned());
+    }
+    if placeholder.chars().any(char::is_whitespace) {
+        return Err(format!(
+            "path placeholder `{placeholder}` must not contain whitespace"
+        ));
+    }
+    if placeholder.contains('/') {
+        return Err(format!(
+            "path placeholder `{placeholder}` must describe one path segment"
+        ));
+    }
+
+    Ok(())
+}
+
+fn has_duplicate(values: &[String]) -> bool {
+    values
         .iter()
         .enumerate()
-        .find(|(_, attr)| attr.path().is_ident(name))?;
-    let value = attr.parse_args::<LitStr>().ok()?.value();
-    attrs.remove(index);
-    Some(value)
+        .any(|(index, value)| values[index + 1..].iter().any(|other| other == value))
 }
 
 fn pat_ident(pat: &Pat) -> Option<Ident> {
     match pat {
-        Pat::Ident(pat_ident) => Some(pat_ident.ident.clone()),
+        Pat::Ident(pat_ident) if pat_ident.by_ref.is_none() && pat_ident.mutability.is_none() => {
+            Some(pat_ident.ident.clone())
+        }
         _ => None,
     }
 }
@@ -452,12 +802,7 @@ fn sender_for(
             "REST client methods must return catnap::Result<T>",
         ));
     };
-    let Some(inner) = result_inner(ty) else {
-        return Err(syn::Error::new_spanned(
-            ty,
-            "REST client methods must return catnap::Result<T>",
-        ));
-    };
+    let inner = result_inner(ty)?;
     if is_response(inner) {
         Ok(quote! { request.send().await })
     } else if is_unit(inner) {
@@ -478,21 +823,50 @@ fn sender_for(
     }
 }
 
-fn result_inner(ty: &Type) -> Option<&Type> {
+fn result_inner(ty: &Type) -> syn::Result<&Type> {
     let Type::Path(type_path) = ty else {
-        return None;
+        return Err(syn::Error::new_spanned(
+            ty,
+            "REST client methods must return catnap::Result<T>",
+        ));
     };
-    let segment = type_path.path.segments.last()?;
+    let Some(segment) = type_path.path.segments.last() else {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "REST client methods must return catnap::Result<T>",
+        ));
+    };
     if segment.ident != "Result" {
-        return None;
+        return Err(syn::Error::new_spanned(
+            ty,
+            "REST client methods must return catnap::Result<T>",
+        ));
     }
     let syn::PathArguments::AngleBracketed(args) = &segment.arguments else {
-        return None;
+        return Err(syn::Error::new_spanned(
+            ty,
+            "REST client methods must return catnap::Result<T>",
+        ));
     };
-    args.args.iter().find_map(|arg| match arg {
+
+    let mut type_args = args.args.iter().filter_map(|arg| match arg {
         syn::GenericArgument::Type(ty) => Some(ty),
         _ => None,
-    })
+    });
+    let Some(inner) = type_args.next() else {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "REST client methods must return catnap::Result<T> with one type parameter",
+        ));
+    };
+    if type_args.next().is_some() || args.args.len() != 1 {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "REST client methods must return catnap::Result<T> with one type parameter",
+        ));
+    }
+
+    Ok(inner)
 }
 
 fn is_response(ty: &Type) -> bool {
@@ -523,8 +897,32 @@ mod tests {
     #[test]
     fn extracts_path_placeholders() {
         assert_eq!(
-            path_placeholders("/users/{user_id}/posts/{post_id}"),
-            ["user_id".to_owned(), "post_id".to_owned()]
+            path_placeholders("/users/{user_id}/posts/{post_id}").expect("valid placeholders"),
+            ["user_id".to_owned(), "post_id".to_owned()],
         );
+    }
+
+    #[test]
+    fn rejects_malformed_path_placeholders() {
+        assert_eq!(
+            path_placeholders("/users/{user_id").expect_err("path should be invalid"),
+            "unclosed `{` in path placeholder",
+        );
+        assert_eq!(
+            path_placeholders("/users/{}").expect_err("path should be invalid"),
+            "path placeholders must not be empty",
+        );
+        assert_eq!(
+            path_placeholders("/users/{user id}").expect_err("path should be invalid"),
+            "path placeholder `user id` must not contain whitespace",
+        );
+    }
+
+    #[test]
+    fn recognizes_qualified_catnap_attributes() {
+        let attr: Attribute = syn::parse_quote!(#[catnap::produces("text/plain")]);
+
+        assert!(is_catnap_attr(&attr, "produces"));
+        assert!(!is_catnap_attr(&attr, "consumes"));
     }
 }
