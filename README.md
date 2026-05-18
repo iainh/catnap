@@ -80,6 +80,8 @@ This first slice supports:
 
 The design intentionally mirrors MicroProfile's developer experience while staying idiomatic for Rust: explicit async traits, typed `Result`, and feature-gated media support.
 
+Catnap emits debug-level `tracing` events for outgoing requests and incoming responses. Sensitive headers such as `Authorization` and `Cookie` are redacted.
+
 ## Examples
 
 The `catnap` crate includes examples using public `httpbin.io` endpoints:

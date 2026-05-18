@@ -33,7 +33,7 @@ pub use catnap_macros::{
 };
 pub use http;
 
-use http::header::{ACCEPT, CONTENT_TYPE};
+use http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, COOKIE, PROXY_AUTHORIZATION, SET_COOKIE};
 use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use reqwest::redirect::Policy;
@@ -42,6 +42,7 @@ use serde::de::DeserializeOwned;
 use std::fmt::Display;
 use std::marker::PhantomData;
 use std::time::Duration;
+use tracing::debug;
 use url::Url;
 
 #[cfg(feature = "basic-auth")]
@@ -358,15 +359,44 @@ impl RequestBuilder {
         }
     }
 
-    pub async fn send(self) -> Result<Response> {
+    async fn send_raw(self) -> Result<reqwest::Response> {
+        if let Some(builder) = self.builder.try_clone() {
+            match builder.build() {
+                Ok(request) => {
+                    debug!(
+                        method = %request.method(),
+                        url = %request.url(),
+                        headers = ?LoggedHeaders(request.headers()),
+                        "sending HTTP request"
+                    );
+                }
+                Err(error) => {
+                    debug!(error = %error, "failed to build request for logging");
+                }
+            }
+        } else {
+            debug!("request body is streaming and cannot be cloned for logging");
+        }
+
         let response = self.builder.send().await?;
+        debug!(
+            status = %response.status(),
+            url = %response.url(),
+            headers = ?LoggedHeaders(response.headers()),
+            "received HTTP response"
+        );
+        Ok(response)
+    }
+
+    pub async fn send(self) -> Result<Response> {
+        let response = self.send_raw().await?;
         Ok(Response { inner: response })
     }
 
     pub async fn send_json<T: DeserializeOwned>(self) -> Result<T> {
         #[cfg(feature = "json")]
         {
-            let response = self.builder.send().await?;
+            let response = self.send_raw().await?;
             let status = response.status();
             if !status.is_success() {
                 let body = response.text().await.unwrap_or_default();
@@ -386,7 +416,7 @@ impl RequestBuilder {
     }
 
     pub async fn send_text(self) -> Result<String> {
-        let response = self.builder.send().await?;
+        let response = self.send_raw().await?;
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
@@ -398,7 +428,7 @@ impl RequestBuilder {
     pub async fn send_xml<T: DeserializeOwned>(self) -> Result<T> {
         #[cfg(feature = "xml")]
         {
-            let response = self.builder.send().await?;
+            let response = self.send_raw().await?;
             let status = response.status();
             let body = response.text().await?;
             if !status.is_success() {
@@ -418,7 +448,7 @@ impl RequestBuilder {
     }
 
     pub async fn send_empty(self) -> Result<()> {
-        let response = self.builder.send().await?;
+        let response = self.send_raw().await?;
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
@@ -426,6 +456,26 @@ impl RequestBuilder {
         }
         Ok(())
     }
+}
+
+struct LoggedHeaders<'a>(&'a HeaderMap);
+
+impl std::fmt::Debug for LoggedHeaders<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut map = formatter.debug_map();
+        for (name, value) in self.0 {
+            if is_sensitive_header(name) {
+                map.entry(&name.as_str(), &"<redacted>");
+            } else {
+                map.entry(&name.as_str(), &value.to_str().unwrap_or("<non-UTF-8>"));
+            }
+        }
+        map.finish()
+    }
+}
+
+fn is_sensitive_header(name: &HeaderName) -> bool {
+    name == AUTHORIZATION || name == PROXY_AUTHORIZATION || name == COOKIE || name == SET_COOKIE
 }
 
 /// Raw response wrapper for callers that need headers, status, or custom body handling.

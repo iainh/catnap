@@ -14,6 +14,7 @@ quick-xml = { workspace = true, optional = true }
 reqwest.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 url.workspace = true
 
 catnap-macros = { path = "../catnap-macros" }
