@@ -304,9 +304,15 @@ fn expand_method(
                     name,
                 },
             ] => {
-                query_params.push(quote! {
-                    request = request.query_param(#name, #arg_ident);
-                });
+                if is_query_collection(&pat_type.ty) {
+                    query_params.push(quote! {
+                        request = request.query_params(#name, #arg_ident);
+                    });
+                } else {
+                    query_params.push(quote! {
+                        request = request.query_param(#name, #arg_ident);
+                    });
+                }
             }
             [
                 ParameterAttr {
@@ -881,6 +887,39 @@ fn is_string(ty: &Type) -> bool {
     matches!(ty, Type::Path(type_path) if type_path.path.segments.last().is_some_and(|segment| segment.ident == "String"))
 }
 
+fn is_query_collection(ty: &Type) -> bool {
+    match ty {
+        Type::Array(_) => true,
+        Type::Reference(reference) => is_query_collection_reference_target(&reference.elem),
+        Type::Path(type_path) => type_path
+            .path
+            .segments
+            .last()
+            .is_some_and(|segment| is_query_collection_ident(&segment.ident)),
+        _ => false,
+    }
+}
+
+fn is_query_collection_reference_target(ty: &Type) -> bool {
+    match ty {
+        Type::Slice(_) => true,
+        Type::Array(_) => true,
+        Type::Path(type_path) => type_path
+            .path
+            .segments
+            .last()
+            .is_some_and(|segment| is_query_collection_ident(&segment.ident)),
+        _ => false,
+    }
+}
+
+fn is_query_collection_ident(ident: &Ident) -> bool {
+    matches!(
+        ident.to_string().as_str(),
+        "Vec" | "VecDeque" | "LinkedList" | "HashSet" | "BTreeSet" | "BinaryHeap"
+    )
+}
+
 fn join_paths(base: &str, method: &str) -> String {
     match (base.trim_end_matches('/'), method.trim_start_matches('/')) {
         ("", "") => "/".to_owned(),
@@ -924,5 +963,20 @@ mod tests {
 
         assert!(is_catnap_attr(&attr, "produces"));
         assert!(!is_catnap_attr(&attr, "consumes"));
+    }
+
+    #[test]
+    fn recognizes_common_query_collections() {
+        assert!(is_query_collection(&syn::parse_quote!(Vec<String>)));
+        assert!(is_query_collection(&syn::parse_quote!(&Vec<String>)));
+        assert!(is_query_collection(&syn::parse_quote!(&[String])));
+        assert!(is_query_collection(&syn::parse_quote!([String; 2])));
+        assert!(is_query_collection(&syn::parse_quote!(
+            std::collections::HashSet<String>
+        )));
+
+        assert!(!is_query_collection(&syn::parse_quote!(String)));
+        assert!(!is_query_collection(&syn::parse_quote!(&str)));
+        assert!(!is_query_collection(&syn::parse_quote!(u32)));
     }
 }
