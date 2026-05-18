@@ -1,4 +1,5 @@
 use proc_macro::TokenStream;
+use proc_macro_crate::{FoundCrate, crate_name};
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::{
@@ -94,13 +95,14 @@ fn expand_rest_client(args: RestClientArgs, trait_item: &mut ItemTrait) -> Token
     let client_ident = format_ident!("{trait_ident}Client");
     let vis = trait_item.vis.clone();
     let base_path = args.path;
+    let catnap = catnap_crate_path();
 
     let mut errors = Vec::new();
     let impl_methods = trait_item
         .items
         .iter_mut()
         .filter_map(|item| match item {
-            TraitItem::Fn(method) => match expand_method(&base_path, method) {
+            TraitItem::Fn(method) => match expand_method(&catnap, &base_path, method) {
                 Ok(method) => Some(method),
                 Err(error) => {
                     errors.push(error.to_compile_error());
@@ -123,19 +125,19 @@ fn expand_rest_client(args: RestClientArgs, trait_item: &mut ItemTrait) -> Token
 
         #[derive(Clone, Debug)]
         #vis struct #client_ident {
-            inner: ::catnap::RestClient,
+            inner: #catnap::RestClient,
         }
 
         impl #client_ident {
-            pub fn builder() -> ::catnap::RestClientBuilder<Self> {
-                ::catnap::RestClientBuilder::new()
+            pub fn builder() -> #catnap::RestClientBuilder<Self> {
+                #catnap::RestClientBuilder::new()
             }
         }
 
-        impl ::catnap::BuildFromConfig for #client_ident {
-            fn build_from_config(config: ::catnap::RestClientConfig) -> ::catnap::Result<Self> {
+        impl #catnap::BuildFromConfig for #client_ident {
+            fn build_from_config(config: #catnap::RestClientConfig) -> #catnap::Result<Self> {
                 Ok(Self {
-                    inner: ::catnap::RestClient::from_config(config)?,
+                    inner: #catnap::RestClient::from_config(config)?,
                 })
             }
         }
@@ -146,7 +148,22 @@ fn expand_rest_client(args: RestClientArgs, trait_item: &mut ItemTrait) -> Token
     }
 }
 
-fn expand_method(base_path: &str, method: &mut TraitItemFn) -> syn::Result<TokenStream2> {
+fn catnap_crate_path() -> TokenStream2 {
+    match crate_name("catnap") {
+        Ok(FoundCrate::Itself) => quote!(::catnap),
+        Ok(FoundCrate::Name(name)) => {
+            let ident = Ident::new(&name, proc_macro2::Span::call_site());
+            quote!(::#ident)
+        }
+        Err(_) => quote!(::catnap),
+    }
+}
+
+fn expand_method(
+    catnap: &TokenStream2,
+    base_path: &str,
+    method: &mut TraitItemFn,
+) -> syn::Result<TokenStream2> {
     let (verb, method_path) = take_http_attr(&mut method.attrs)?.ok_or_else(|| {
         syn::Error::new_spanned(
             &method.sig.ident,
@@ -174,7 +191,7 @@ fn expand_method(base_path: &str, method: &mut TraitItemFn) -> syn::Result<Token
             path_replacements.push(quote! {
                 path = path.replace(
                     concat!("{", #name, "}"),
-                    &::catnap::__private::encode_path_segment(#arg_ident),
+                    &#catnap::__private::encode_path_segment(#arg_ident),
                 );
             });
         } else if let Some(name) = take_named_attr(&mut pat_type.attrs, "query") {
@@ -205,7 +222,7 @@ fn expand_method(base_path: &str, method: &mut TraitItemFn) -> syn::Result<Token
         #sig {
             let mut path = #full_path.to_owned();
             #(#path_replacements)*
-            let mut request = self.inner.request(::catnap::http::Method::#verb_ident, &path)?;
+            let mut request = self.inner.request(#catnap::http::Method::#verb_ident, &path)?;
             #(#query_params)*
             #(#header_params)*
             #body
