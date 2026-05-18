@@ -46,6 +46,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Errors produced while building or invoking a generated REST client.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("base URL is required")]
+    MissingBaseUrl,
     #[error("invalid base URL: {0}")]
     InvalidBaseUrl(#[from] url::ParseError),
     #[error("invalid HTTP header name `{0}`")]
@@ -164,9 +166,7 @@ pub struct RestClient {
 
 impl RestClient {
     pub fn from_config(config: RestClientConfig) -> Result<Self> {
-        let mut base_url = config
-            .base_url
-            .unwrap_or_else(|| Url::parse("http://localhost").expect("static URL is valid"));
+        let mut base_url = config.base_url.ok_or(Error::MissingBaseUrl)?;
         if !base_url.path().ends_with('/') {
             let next_path = format!("{}/", base_url.path());
             base_url.set_path(&next_path);
@@ -299,5 +299,18 @@ impl Response {
 
     pub async fn json<T: DeserializeOwned>(self) -> Result<T> {
         Ok(self.inner.json::<T>().await?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builder_requires_base_url() {
+        let err = RestClient::from_config(RestClientConfig::default())
+            .expect_err("missing base URL should fail");
+
+        assert!(matches!(err, Error::MissingBaseUrl));
     }
 }
