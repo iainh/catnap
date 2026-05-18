@@ -247,12 +247,12 @@ impl RequestBuilder {
         self
     }
 
-    pub fn header(mut self, name: &str, value: impl ToString) -> Self {
+    pub fn header(mut self, name: &str, value: impl Display) -> Self {
         self.builder = self.builder.header(name, value.to_string());
         self
     }
 
-    pub fn query_param(mut self, name: &str, value: impl ToString) -> Self {
+    pub fn query_param(mut self, name: &str, value: impl Display) -> Self {
         self.builder = self.builder.query(&[(name, value.to_string())]);
         self
     }
@@ -260,7 +260,7 @@ impl RequestBuilder {
     pub fn query_params<I, V>(mut self, name: &str, values: I) -> Self
     where
         I: IntoIterator<Item = V>,
-        V: ToString,
+        V: Display,
     {
         let values: Vec<String> = values.into_iter().map(|value| value.to_string()).collect();
         match self.query_param_style {
