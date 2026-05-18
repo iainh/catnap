@@ -518,6 +518,7 @@ impl RestClient {
         Ok(RequestBuilder {
             builder: self.client.request(method, url),
             query_param_style: self.query_param_style,
+            query_params: Vec::new(),
         }
         .headers(self.default_headers.clone()))
     }
@@ -527,6 +528,7 @@ impl RestClient {
 pub struct RequestBuilder {
     builder: reqwest::RequestBuilder,
     query_param_style: QueryParamStyle,
+    query_params: Vec<(String, String)>,
 }
 
 impl RequestBuilder {
@@ -556,7 +558,7 @@ impl RequestBuilder {
 
     /// Adds a query parameter.
     pub fn query_param(mut self, name: &str, value: impl Display) -> Self {
-        self.builder = self.builder.query(&[(name, value.to_string())]);
+        self.query_params.push((name.to_owned(), value.to_string()));
         self
     }
 
@@ -570,16 +572,16 @@ impl RequestBuilder {
         match self.query_param_style {
             QueryParamStyle::MultiPairs => {
                 for value in values {
-                    self.builder = self.builder.query(&[(name, value)]);
+                    self.query_params.push((name.to_owned(), value));
                 }
             }
             QueryParamStyle::CommaSeparated => {
-                self.builder = self.builder.query(&[(name, values.join(","))]);
+                self.query_params.push((name.to_owned(), values.join(",")));
             }
             QueryParamStyle::ArrayPairs => {
                 let array_name = format!("{name}[]");
                 for value in values {
-                    self.builder = self.builder.query(&[(array_name.as_str(), value)]);
+                    self.query_params.push((array_name.clone(), value));
                 }
             }
         }
@@ -636,9 +638,22 @@ impl RequestBuilder {
         }
     }
 
+    fn build(self) -> Result<(reqwest::Client, reqwest::Request)> {
+        let (client, request) = self.builder.build_split();
+        let mut request = request?;
+        if !self.query_params.is_empty() {
+            request
+                .url_mut()
+                .query_pairs_mut()
+                .extend_pairs(self.query_params);
+        }
+        Ok((client, request))
+    }
+
     async fn send_streaming(self) -> Result<reqwest::Response> {
-        log_request(&self.builder);
-        let response = self.builder.send().await?;
+        let (client, request) = self.build()?;
+        log_request(&request);
+        let response = client.execute(request).await?;
         debug!(
             status = %response.status(),
             url = %response.url(),
@@ -649,8 +664,9 @@ impl RequestBuilder {
     }
 
     async fn send_buffered(self) -> Result<BufferedResponse> {
-        log_request(&self.builder);
-        let response = self.builder.send().await?;
+        let (client, request) = self.build()?;
+        log_request(&request);
+        let response = client.execute(request).await?;
         let status = response.status();
         let url = response.url().clone();
         let headers = response.headers().clone();
@@ -774,29 +790,18 @@ fn is_sensitive_header(name: &HeaderName) -> bool {
     name == AUTHORIZATION || name == PROXY_AUTHORIZATION || name == COOKIE || name == SET_COOKIE
 }
 
-fn log_request(builder: &reqwest::RequestBuilder) {
+fn log_request(request: &reqwest::Request) {
     if !tracing::enabled!(Level::DEBUG) {
         return;
     }
 
-    if let Some(builder) = builder.try_clone() {
-        match builder.build() {
-            Ok(request) => {
-                debug!(
-                    method = %request.method(),
-                    url = %request.url(),
-                    headers = ?LoggedHeaders(request.headers()),
-                    body = ?request.body().and_then(reqwest::Body::as_bytes).map(LoggedBody),
-                    "sending HTTP request"
-                );
-            }
-            Err(error) => {
-                debug!(error = %error, "failed to build request for logging");
-            }
-        }
-    } else {
-        debug!("request body is streaming and cannot be cloned for logging");
-    }
+    debug!(
+        method = %request.method(),
+        url = %request.url(),
+        headers = ?LoggedHeaders(request.headers()),
+        body = ?request.body().and_then(reqwest::Body::as_bytes).map(LoggedBody),
+        "sending HTTP request"
+    );
 }
 
 struct LoggedBody<'a>(&'a [u8]);
