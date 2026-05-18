@@ -15,7 +15,7 @@ Add catnap to your project:
 
 ```toml
 [dependencies]
-catnap = "0.2"
+catnap = "0.3"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
@@ -268,7 +268,7 @@ XML is optional. Enable the `xml` feature and use `#[consumes]` or `#[produces]`
 with `application/xml` or `text/xml`:
 
 ```toml
-catnap = { version = "0.2", features = ["xml"] }
+catnap = { version = "0.3", features = ["xml"] }
 ```
 
 ```rust
@@ -381,25 +381,25 @@ Optional features:
 Minimal HTTP-only install without default features:
 
 ```toml
-catnap = { version = "0.2", default-features = false }
+catnap = { version = "0.3", default-features = false }
 ```
 
 JSON without basic auth or TLS:
 
 ```toml
-catnap = { version = "0.2", default-features = false, features = ["json"] }
+catnap = { version = "0.3", default-features = false, features = ["json"] }
 ```
 
 JSON with HTTPS but without basic auth:
 
 ```toml
-catnap = { version = "0.2", default-features = false, features = ["json", "tls-rustls"] }
+catnap = { version = "0.3", default-features = false, features = ["json", "tls-rustls"] }
 ```
 
 JSON and XML:
 
 ```toml
-catnap = { version = "0.2", features = ["xml"] }
+catnap = { version = "0.3", features = ["xml"] }
 ```
 
 ## Examples
