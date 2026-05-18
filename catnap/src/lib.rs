@@ -42,7 +42,7 @@ use serde::de::DeserializeOwned;
 use std::fmt::Display;
 use std::marker::PhantomData;
 use std::time::Duration;
-use tracing::debug;
+use tracing::{Level, debug};
 use url::Url;
 
 #[cfg(feature = "basic-auth")]
@@ -362,54 +362,48 @@ impl RequestBuilder {
         }
     }
 
-    async fn send_raw(self) -> Result<BufferedResponse> {
-        if let Some(builder) = self.builder.try_clone() {
-            match builder.build() {
-                Ok(request) => {
-                    debug!(
-                        method = %request.method(),
-                        url = %request.url(),
-                        headers = ?LoggedHeaders(request.headers()),
-                        body = ?request.body().and_then(reqwest::Body::as_bytes).map(LoggedBody),
-                        "sending HTTP request"
-                    );
-                }
-                Err(error) => {
-                    debug!(error = %error, "failed to build request for logging");
-                }
-            }
-        } else {
-            debug!("request body is streaming and cannot be cloned for logging");
-        }
+    async fn send_streaming(self) -> Result<reqwest::Response> {
+        log_request(&self.builder);
+        let response = self.builder.send().await?;
+        debug!(
+            status = %response.status(),
+            url = %response.url(),
+            headers = ?LoggedHeaders(response.headers()),
+            "received HTTP response"
+        );
+        Ok(response)
+    }
 
+    async fn send_buffered(self) -> Result<BufferedResponse> {
+        log_request(&self.builder);
         let response = self.builder.send().await?;
         let status = response.status();
         let url = response.url().clone();
         let headers = response.headers().clone();
         let body = response.bytes().await?.to_vec();
-        debug!(
-            status = %status,
-            url = %url,
-            headers = ?LoggedHeaders(&headers),
-            body = ?LoggedBody(&body),
-            "received HTTP response"
-        );
-        Ok(BufferedResponse {
-            status,
-            headers,
-            body,
-        })
+        if tracing::enabled!(Level::DEBUG) {
+            debug!(
+                status = %status,
+                url = %url,
+                headers = ?LoggedHeaders(&headers),
+                body = ?LoggedBody(&body),
+                "received HTTP response"
+            );
+        }
+        Ok(BufferedResponse { status, body })
     }
 
     pub async fn send(self) -> Result<Response> {
-        let response = self.send_raw().await?;
-        Ok(Response { inner: response })
+        let response = self.send_streaming().await?;
+        Ok(Response {
+            inner: ResponseInner::Streaming(response),
+        })
     }
 
     pub async fn send_json<T: DeserializeOwned>(self) -> Result<T> {
         #[cfg(feature = "json")]
         {
-            let response = self.send_raw().await?;
+            let response = self.send_buffered().await?;
             let status = response.status;
             if !status.is_success() {
                 let body = response.body_text();
@@ -429,7 +423,7 @@ impl RequestBuilder {
     }
 
     pub async fn send_text(self) -> Result<String> {
-        let response = self.send_raw().await?;
+        let response = self.send_buffered().await?;
         let status = response.status;
         if !status.is_success() {
             let body = response.body_text();
@@ -441,7 +435,7 @@ impl RequestBuilder {
     pub async fn send_xml<T: DeserializeOwned>(self) -> Result<T> {
         #[cfg(feature = "xml")]
         {
-            let response = self.send_raw().await?;
+            let response = self.send_buffered().await?;
             let status = response.status;
             let body = response.body_text();
             if !status.is_success() {
@@ -461,7 +455,7 @@ impl RequestBuilder {
     }
 
     pub async fn send_empty(self) -> Result<()> {
-        let response = self.send_raw().await?;
+        let response = self.send_buffered().await?;
         let status = response.status;
         if !status.is_success() {
             let body = response.body_text();
@@ -491,6 +485,31 @@ fn is_sensitive_header(name: &HeaderName) -> bool {
     name == AUTHORIZATION || name == PROXY_AUTHORIZATION || name == COOKIE || name == SET_COOKIE
 }
 
+fn log_request(builder: &reqwest::RequestBuilder) {
+    if !tracing::enabled!(Level::DEBUG) {
+        return;
+    }
+
+    if let Some(builder) = builder.try_clone() {
+        match builder.build() {
+            Ok(request) => {
+                debug!(
+                    method = %request.method(),
+                    url = %request.url(),
+                    headers = ?LoggedHeaders(request.headers()),
+                    body = ?request.body().and_then(reqwest::Body::as_bytes).map(LoggedBody),
+                    "sending HTTP request"
+                );
+            }
+            Err(error) => {
+                debug!(error = %error, "failed to build request for logging");
+            }
+        }
+    } else {
+        debug!("request body is streaming and cannot be cloned for logging");
+    }
+}
+
 struct LoggedBody<'a>(&'a [u8]);
 
 impl std::fmt::Debug for LoggedBody<'_> {
@@ -504,7 +523,6 @@ impl std::fmt::Debug for LoggedBody<'_> {
 
 struct BufferedResponse {
     status: StatusCode,
-    headers: HeaderMap,
     body: Vec<u8>,
 }
 
@@ -516,26 +534,38 @@ impl BufferedResponse {
 
 /// Raw response wrapper for callers that need headers, status, or custom body handling.
 pub struct Response {
-    inner: BufferedResponse,
+    inner: ResponseInner,
+}
+
+enum ResponseInner {
+    Streaming(reqwest::Response),
 }
 
 impl Response {
     pub fn status(&self) -> StatusCode {
-        self.inner.status
+        match &self.inner {
+            ResponseInner::Streaming(response) => response.status(),
+        }
     }
 
     pub fn headers(&self) -> &HeaderMap {
-        &self.inner.headers
+        match &self.inner {
+            ResponseInner::Streaming(response) => response.headers(),
+        }
     }
 
     pub async fn text(self) -> Result<String> {
-        Ok(self.inner.body_text())
+        match self.inner {
+            ResponseInner::Streaming(response) => Ok(response.text().await?),
+        }
     }
 
     pub async fn json<T: DeserializeOwned>(self) -> Result<T> {
         #[cfg(feature = "json")]
         {
-            Ok(serde_json::from_slice(&self.inner.body)?)
+            match self.inner {
+                ResponseInner::Streaming(response) => Ok(response.json::<T>().await?),
+            }
         }
 
         #[cfg(not(feature = "json"))]
@@ -551,7 +581,11 @@ impl Response {
     pub async fn xml<T: DeserializeOwned>(self) -> Result<T> {
         #[cfg(feature = "xml")]
         {
-            Ok(quick_xml::de::from_str(&self.inner.body_text())?)
+            match self.inner {
+                ResponseInner::Streaming(response) => {
+                    Ok(quick_xml::de::from_str(&response.text().await?)?)
+                }
+            }
         }
 
         #[cfg(not(feature = "xml"))]
