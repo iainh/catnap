@@ -95,14 +95,28 @@ fn expand_rest_client(args: RestClientArgs, trait_item: &mut ItemTrait) -> Token
     let vis = trait_item.vis.clone();
     let base_path = args.path;
 
+    let mut errors = Vec::new();
     let impl_methods = trait_item
         .items
         .iter_mut()
         .filter_map(|item| match item {
-            TraitItem::Fn(method) => Some(expand_method(&base_path, method)),
+            TraitItem::Fn(method) => match expand_method(&base_path, method) {
+                Ok(method) => Some(method),
+                Err(error) => {
+                    errors.push(error.to_compile_error());
+                    None
+                }
+            },
             _ => None,
         })
         .collect::<Vec<_>>();
+
+    if !errors.is_empty() {
+        return quote! {
+            #trait_item
+            #(#errors)*
+        };
+    }
 
     quote! {
         #trait_item
@@ -132,15 +146,20 @@ fn expand_rest_client(args: RestClientArgs, trait_item: &mut ItemTrait) -> Token
     }
 }
 
-fn expand_method(base_path: &str, method: &mut TraitItemFn) -> TokenStream2 {
-    let (verb, method_path) =
-        take_http_attr(&mut method.attrs).unwrap_or_else(|| ("GET".to_owned(), String::new()));
+fn expand_method(base_path: &str, method: &mut TraitItemFn) -> syn::Result<TokenStream2> {
+    let (verb, method_path) = take_http_attr(&mut method.attrs)?.ok_or_else(|| {
+        syn::Error::new_spanned(
+            &method.sig.ident,
+            "REST client methods must have an HTTP method attribute",
+        )
+    })?;
     let full_path = join_paths(base_path, &method_path);
 
     let mut path_replacements = Vec::new();
     let mut query_params = Vec::new();
     let mut header_params = Vec::new();
     let mut body_arg = None;
+    let mut path_param_names = Vec::new();
 
     for input in &mut method.sig.inputs {
         let FnArg::Typed(pat_type) = input else {
@@ -151,6 +170,7 @@ fn expand_method(base_path: &str, method: &mut TraitItemFn) -> TokenStream2 {
             continue;
         };
         if let Some(name) = take_named_attr(&mut pat_type.attrs, "path") {
+            path_param_names.push(name.clone());
             path_replacements.push(quote! {
                 path = path.replace(
                     concat!("{", #name, "}"),
@@ -165,18 +185,23 @@ fn expand_method(base_path: &str, method: &mut TraitItemFn) -> TokenStream2 {
             header_params.push(quote! {
                 request = request.header(#name, #arg_ident);
             });
-        } else if body_arg.is_none() {
-            body_arg = Some(arg_ident);
+        } else if body_arg.replace(arg_ident).is_some() {
+            return Err(syn::Error::new_spanned(
+                pat_type,
+                "REST client methods may have at most one unannotated body argument",
+            ));
         }
     }
+
+    validate_path_params(&full_path, &path_param_names, method)?;
 
     let sig = method.sig.clone();
     let output = &sig.output;
     let body = body_arg.map(|arg| quote! { request = request.json(#arg); });
-    let sender = sender_for(output);
+    let sender = sender_for(output)?;
     let verb_ident = format_ident!("{}", verb);
 
-    quote! {
+    Ok(quote! {
         #sig {
             let mut path = #full_path.to_owned();
             #(#path_replacements)*
@@ -186,25 +211,78 @@ fn expand_method(base_path: &str, method: &mut TraitItemFn) -> TokenStream2 {
             #body
             #sender
         }
-    }
+    })
 }
 
-fn take_http_attr(attrs: &mut Vec<Attribute>) -> Option<(String, String)> {
-    for verb in ["get", "post", "put", "patch", "delete", "options", "head"] {
-        if let Some((index, attr)) = attrs
-            .iter()
-            .enumerate()
-            .find(|(_, attr)| attr.path().is_ident(verb))
-        {
-            let path = attr
-                .parse_args::<LitStr>()
-                .map(|lit| lit.value())
-                .unwrap_or_default();
-            attrs.remove(index);
-            return Some((verb.to_uppercase(), path));
+fn take_http_attr(attrs: &mut Vec<Attribute>) -> syn::Result<Option<(String, String)>> {
+    let mut found = None;
+    let mut index = 0;
+    while index < attrs.len() {
+        let attr = &attrs[index];
+        let Some(verb) = ["get", "post", "put", "patch", "delete", "options", "head"]
+            .into_iter()
+            .find(|verb| attr.path().is_ident(verb))
+        else {
+            index += 1;
+            continue;
+        };
+
+        if found.is_some() {
+            return Err(syn::Error::new_spanned(
+                attr,
+                "REST client methods may have only one HTTP method attribute",
+            ));
+        }
+
+        let path = attr
+            .parse_args::<LitStr>()
+            .map(|lit| lit.value())
+            .unwrap_or_default();
+        attrs.remove(index);
+        found = Some((verb.to_uppercase(), path));
+    }
+    Ok(found)
+}
+
+fn validate_path_params(
+    full_path: &str,
+    path_param_names: &[String],
+    method: &TraitItemFn,
+) -> syn::Result<()> {
+    let placeholders = path_placeholders(full_path);
+    for placeholder in &placeholders {
+        if !path_param_names.iter().any(|name| name == placeholder) {
+            return Err(syn::Error::new_spanned(
+                &method.sig.ident,
+                format!("missing #[path(\"{placeholder}\")] argument for path placeholder"),
+            ));
         }
     }
-    None
+
+    for name in path_param_names {
+        if !placeholders.iter().any(|placeholder| placeholder == name) {
+            return Err(syn::Error::new_spanned(
+                &method.sig.ident,
+                format!("#[path(\"{name}\")] does not match a path placeholder"),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn path_placeholders(path: &str) -> Vec<String> {
+    let mut placeholders = Vec::new();
+    let mut rest = path;
+    while let Some(start) = rest.find('{') {
+        rest = &rest[start + 1..];
+        let Some(end) = rest.find('}') else {
+            break;
+        };
+        placeholders.push(rest[..end].to_owned());
+        rest = &rest[end + 1..];
+    }
+    placeholders
 }
 
 fn take_named_attr(attrs: &mut Vec<Attribute>, name: &str) -> Option<String> {
@@ -224,19 +302,25 @@ fn pat_ident(pat: &Pat) -> Option<Ident> {
     }
 }
 
-fn sender_for(output: &ReturnType) -> TokenStream2 {
+fn sender_for(output: &ReturnType) -> syn::Result<TokenStream2> {
     let ReturnType::Type(_, ty) = output else {
-        return quote! { request.send_empty().await };
+        return Err(syn::Error::new_spanned(
+            output,
+            "REST client methods must return catnap::Result<T>",
+        ));
     };
     let Some(inner) = result_inner(ty) else {
-        return quote! { request.send_empty().await };
+        return Err(syn::Error::new_spanned(
+            ty,
+            "REST client methods must return catnap::Result<T>",
+        ));
     };
     if is_response(inner) {
-        quote! { request.send().await }
+        Ok(quote! { request.send().await })
     } else if is_unit(inner) {
-        quote! { request.send_empty().await }
+        Ok(quote! { request.send_empty().await })
     } else {
-        quote! { request.send_json::<#inner>().await }
+        Ok(quote! { request.send_json::<#inner>().await })
     }
 }
 
@@ -271,5 +355,18 @@ fn join_paths(base: &str, method: &str) -> String {
         ("", method) => format!("/{method}"),
         (base, "") => base.to_owned(),
         (base, method) => format!("{base}/{method}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_path_placeholders() {
+        assert_eq!(
+            path_placeholders("/users/{user_id}/posts/{post_id}"),
+            ["user_id".to_owned(), "post_id".to_owned()]
+        );
     }
 }
