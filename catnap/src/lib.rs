@@ -11,7 +11,7 @@
 //! # Making a GET request
 //!
 //! ```
-//! use catnap::{get, path, rest_client, RestClientBuilder, Result};
+//! use catnap::prelude::*;
 //! use serde::Deserialize;
 //!
 //! #[derive(Deserialize)]
@@ -125,6 +125,18 @@ pub use catnap_macros::{
     rest_client,
 };
 pub use http;
+
+/// Common imports for defining generated REST clients.
+///
+/// This module re-exports the annotation macros and the primary runtime types
+/// most client traits need. It is intended for examples, small clients, and
+/// application code that defines several Catnap traits in one module.
+pub mod prelude {
+    pub use crate::{
+        Error, MediaOperation, QueryParamStyle, Response, RestClientBuilder, Result, consumes,
+        delete, get, head, header, options, patch, path, post, produces, put, query, rest_client,
+    };
+}
 
 use http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, COOKIE, PROXY_AUTHORIZATION, SET_COOKIE};
 use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
