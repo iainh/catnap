@@ -33,15 +33,39 @@ pub use catnap_macros::{
 pub use http;
 
 use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
+use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use reqwest::redirect::Policy;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use std::fmt::Display;
 use std::marker::PhantomData;
 use std::time::Duration;
 use url::Url;
 
 /// Crate-wide result type.
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[doc(hidden)]
+pub mod __private {
+    use super::*;
+
+    const PATH_SEGMENT_ENCODE_SET: &AsciiSet = &CONTROLS
+        .add(b' ')
+        .add(b'"')
+        .add(b'#')
+        .add(b'%')
+        .add(b'/')
+        .add(b'<')
+        .add(b'>')
+        .add(b'?')
+        .add(b'`')
+        .add(b'{')
+        .add(b'}');
+
+    pub fn encode_path_segment(value: impl Display) -> String {
+        utf8_percent_encode(&value.to_string(), PATH_SEGMENT_ENCODE_SET).to_string()
+    }
+}
 
 /// Errors produced while building or invoking a generated REST client.
 #[derive(Debug, thiserror::Error)]
@@ -338,5 +362,10 @@ mod tests {
         };
 
         assert!(matches!(err, Error::InvalidRequestUrl { .. }));
+    }
+
+    #[test]
+    fn path_segment_encoding_preserves_single_segment() {
+        assert_eq!(__private::encode_path_segment("a/b c"), "a%2Fb%20c");
     }
 }

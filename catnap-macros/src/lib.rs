@@ -154,7 +154,7 @@ fn expand_method(base_path: &str, method: &mut TraitItemFn) -> TokenStream2 {
             path_replacements.push(quote! {
                 path = path.replace(
                     concat!("{", #name, "}"),
-                    &::std::string::ToString::to_string(#arg_ident),
+                    &::catnap::__private::encode_path_segment(#arg_ident),
                 );
             });
         } else if let Some(name) = take_named_attr(&mut pat_type.attrs, "query") {

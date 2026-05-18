@@ -60,6 +60,7 @@ version = "0.1.0"
 dependencies = [
  "catnap-macros",
  "http",
+ "percent-encoding",
  "reqwest",
  "serde",
  "serde_json",
