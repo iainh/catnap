@@ -190,7 +190,7 @@ pub enum Error {
     /// The selected request or response media type is not supported.
     UnsupportedMediaType {
         /// The operation that required media type support.
-        operation: &'static str,
+        operation: MediaOperation,
         /// The unsupported media type.
         media_type: &'static str,
     },
@@ -214,6 +214,24 @@ pub enum Error {
         /// The response body decoded as UTF-8 lossily.
         body: String,
     },
+}
+
+/// Operation that required media type support.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaOperation {
+    /// Serializing a request body.
+    RequestSerialization,
+    /// Deserializing a response body.
+    ResponseDeserialization,
+}
+
+impl Display for MediaOperation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RequestSerialization => formatter.write_str("request body serialization"),
+            Self::ResponseDeserialization => formatter.write_str("response deserialization"),
+        }
+    }
 }
 
 impl Display for Error {
@@ -605,7 +623,7 @@ impl RequestBuilder {
             let _ = body;
             let _ = self;
             Err(Error::UnsupportedMediaType {
-                operation: "request body serialization",
+                operation: MediaOperation::RequestSerialization,
                 media_type: "application/json",
             })
         }
@@ -633,7 +651,7 @@ impl RequestBuilder {
             let _ = body;
             let _ = self;
             Err(Error::UnsupportedMediaType {
-                operation: "request body serialization",
+                operation: MediaOperation::RequestSerialization,
                 media_type: "application/xml",
             })
         }
@@ -712,7 +730,7 @@ impl RequestBuilder {
         {
             let _ = self;
             Err(Error::UnsupportedMediaType {
-                operation: "response deserialization",
+                operation: MediaOperation::ResponseDeserialization,
                 media_type: "application/json",
             })
         }
@@ -751,7 +769,7 @@ impl RequestBuilder {
         {
             let _ = self;
             Err(Error::UnsupportedMediaType {
-                operation: "response deserialization",
+                operation: MediaOperation::ResponseDeserialization,
                 media_type: "application/xml",
             })
         }
@@ -877,7 +895,7 @@ impl Response {
         {
             let _ = self;
             Err(Error::UnsupportedMediaType {
-                operation: "response deserialization",
+                operation: MediaOperation::ResponseDeserialization,
                 media_type: "application/json",
             })
         }
@@ -900,7 +918,7 @@ impl Response {
         {
             let _ = self;
             Err(Error::UnsupportedMediaType {
-                operation: "response deserialization",
+                operation: MediaOperation::ResponseDeserialization,
                 media_type: "application/xml",
             })
         }

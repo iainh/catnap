@@ -93,16 +93,16 @@ pub fn produces(_: TokenStream, item: TokenStream) -> TokenStream {
 
 struct RestClientArgs {
     path: String,
-    consumes: String,
-    produces: String,
+    consumes: MediaType,
+    produces: MediaType,
 }
 
 impl syn::parse::Parse for RestClientArgs {
     fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Self> {
         let mut args = Self {
             path: String::new(),
-            consumes: APPLICATION_JSON.to_owned(),
-            produces: APPLICATION_JSON.to_owned(),
+            consumes: MediaType::Json,
+            produces: MediaType::Json,
         };
         if input.is_empty() {
             return Ok(args);
@@ -160,6 +160,41 @@ const APPLICATION_JSON: &str = "application/json";
 const APPLICATION_XML: &str = "application/xml";
 const TEXT_PLAIN: &str = "text/plain";
 const TEXT_XML: &str = "text/xml";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MediaType {
+    Json,
+    Xml,
+    TextXml,
+    TextPlain,
+    Other(String),
+}
+
+impl MediaType {
+    fn parse(value: &str) -> Self {
+        match value {
+            APPLICATION_JSON => Self::Json,
+            APPLICATION_XML => Self::Xml,
+            TEXT_XML => Self::TextXml,
+            TEXT_PLAIN => Self::TextPlain,
+            _ => Self::Other(value.to_owned()),
+        }
+    }
+
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Json => APPLICATION_JSON,
+            Self::Xml => APPLICATION_XML,
+            Self::TextXml => TEXT_XML,
+            Self::TextPlain => TEXT_PLAIN,
+            Self::Other(value) => value,
+        }
+    }
+
+    fn is_xml(&self) -> bool {
+        matches!(self, Self::Xml | Self::TextXml)
+    }
+}
 
 fn expand_rest_client(args: RestClientArgs, trait_item: &mut ItemTrait) -> TokenStream2 {
     trait_item
@@ -346,6 +381,7 @@ fn expand_method(
     let output = &sig.output;
     let body = body_for(catnap, body_arg, &consumes)?;
     let sender = sender_for(catnap, output, &produces)?;
+    let produces = produces.as_str();
     let verb_ident = format_ident!("{}", verb);
 
     Ok(quote! {
@@ -448,11 +484,11 @@ fn take_http_attr(attrs: &mut Vec<Attribute>) -> syn::Result<Option<(String, Str
 #[derive(Debug)]
 struct ResourceConfig {
     path: String,
-    consumes: String,
-    produces: String,
+    consumes: MediaType,
+    produces: MediaType,
 }
 
-fn take_media_type_attr(attrs: &mut Vec<Attribute>, name: &str) -> syn::Result<Option<String>> {
+fn take_media_type_attr(attrs: &mut Vec<Attribute>, name: &str) -> syn::Result<Option<MediaType>> {
     let matches = matching_attr_indices(attrs, name);
     let Some(first_index) = matches.first().copied() else {
         return Ok(None);
@@ -637,11 +673,11 @@ fn validate_path_template(value: &str, span: proc_macro2::Span) -> syn::Result<(
         .map_err(|message| syn::Error::new(span, format!("invalid REST client path: {message}")))
 }
 
-fn validate_media_type_lit(lit: &LitStr) -> syn::Result<String> {
+fn validate_media_type_lit(lit: &LitStr) -> syn::Result<MediaType> {
     validate_media_type(&lit.value(), lit.span())
 }
 
-fn validate_media_type(value: &str, span: proc_macro2::Span) -> syn::Result<String> {
+fn validate_media_type(value: &str, span: proc_macro2::Span) -> syn::Result<MediaType> {
     let (kind, subtype) = value
         .split_once('/')
         .ok_or_else(|| syn::Error::new(span, "media types must use `type/subtype` syntax"))?;
@@ -657,7 +693,7 @@ fn validate_media_type(value: &str, span: proc_macro2::Span) -> syn::Result<Stri
         ));
     }
 
-    Ok(value.to_owned())
+    Ok(MediaType::parse(value))
 }
 
 fn validate_path_params(
@@ -772,35 +808,54 @@ fn pat_ident(pat: &Pat) -> Option<Ident> {
 fn body_for(
     catnap: &TokenStream2,
     body_arg: Option<Ident>,
-    consumes: &str,
+    consumes: &MediaType,
 ) -> syn::Result<TokenStream2> {
     let Some(arg) = body_arg else {
         return Ok(quote! {});
     };
 
-    match consumes {
-        APPLICATION_JSON => Ok(quote! {
-            request = request.content_type(#consumes).json(#arg)?;
+    let media_type = consumes.as_str();
+    match BodyMode::for_media_type(consumes) {
+        BodyMode::Json => Ok(quote! {
+            request = request.content_type(#media_type).json(#arg)?;
         }),
-        APPLICATION_XML | TEXT_XML => Ok(quote! {
-            request = request.content_type(#consumes).xml(#arg)?;
+        BodyMode::Xml => Ok(quote! {
+            request = request.content_type(#media_type).xml(#arg)?;
         }),
-        TEXT_PLAIN => Ok(quote! {
-            request = request.content_type(#consumes).text(#arg);
+        BodyMode::Text => Ok(quote! {
+            request = request.content_type(#media_type).text(#arg);
         }),
-        _ => Ok(quote! {
+        BodyMode::Unsupported => Ok(quote! {
             return Err(#catnap::Error::UnsupportedMediaType {
-                operation: "request body serialization",
-                media_type: #consumes,
+                operation: #catnap::MediaOperation::RequestSerialization,
+                media_type: #media_type,
             });
         }),
+    }
+}
+
+enum BodyMode {
+    Json,
+    Xml,
+    Text,
+    Unsupported,
+}
+
+impl BodyMode {
+    fn for_media_type(media_type: &MediaType) -> Self {
+        match media_type {
+            MediaType::Json => Self::Json,
+            MediaType::Xml | MediaType::TextXml => Self::Xml,
+            MediaType::TextPlain => Self::Text,
+            MediaType::Other(_) => Self::Unsupported,
+        }
     }
 }
 
 fn sender_for(
     catnap: &TokenStream2,
     output: &ReturnType,
-    produces: &str,
+    produces: &MediaType,
 ) -> syn::Result<TokenStream2> {
     let ReturnType::Type(_, ty) = output else {
         return Err(syn::Error::new_spanned(
@@ -809,23 +864,46 @@ fn sender_for(
         ));
     };
     let inner = result_inner(ty)?;
-    if is_response(inner) {
-        Ok(quote! { request.send().await })
-    } else if is_unit(inner) {
-        Ok(quote! { request.send_empty().await })
-    } else if is_string(inner) && produces == TEXT_PLAIN {
-        Ok(quote! { request.send_text().await })
-    } else if produces == APPLICATION_JSON {
-        Ok(quote! { request.send_json::<#inner>().await })
-    } else if matches!(produces, APPLICATION_XML | TEXT_XML) {
-        Ok(quote! { request.send_xml::<#inner>().await })
-    } else {
-        Ok(quote! {
+    let media_type = produces.as_str();
+    match ResponseMode::for_return_type(inner, produces) {
+        ResponseMode::Raw => Ok(quote! { request.send().await }),
+        ResponseMode::Empty => Ok(quote! { request.send_empty().await }),
+        ResponseMode::Text => Ok(quote! { request.send_text().await }),
+        ResponseMode::Json(inner) => Ok(quote! { request.send_json::<#inner>().await }),
+        ResponseMode::Xml(inner) => Ok(quote! { request.send_xml::<#inner>().await }),
+        ResponseMode::Unsupported => Ok(quote! {
             Err(#catnap::Error::UnsupportedMediaType {
-                operation: "response deserialization",
-                media_type: #produces,
+                operation: #catnap::MediaOperation::ResponseDeserialization,
+                media_type: #media_type,
             })
-        })
+        }),
+    }
+}
+
+enum ResponseMode<'a> {
+    Raw,
+    Empty,
+    Text,
+    Json(&'a Type),
+    Xml(&'a Type),
+    Unsupported,
+}
+
+impl<'a> ResponseMode<'a> {
+    fn for_return_type(inner: &'a Type, media_type: &MediaType) -> Self {
+        if is_response(inner) {
+            Self::Raw
+        } else if is_unit(inner) {
+            Self::Empty
+        } else if is_string(inner) && matches!(media_type, MediaType::TextPlain) {
+            Self::Text
+        } else if matches!(media_type, MediaType::Json) {
+            Self::Json(inner)
+        } else if media_type.is_xml() {
+            Self::Xml(inner)
+        } else {
+            Self::Unsupported
+        }
     }
 }
 
