@@ -34,8 +34,8 @@ pub use http;
 
 use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use reqwest::redirect::Policy;
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use std::marker::PhantomData;
 use std::time::Duration;
 use url::Url;

@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use catnap::{rest_client, Response, RestClientBuilder, Result};
+use catnap::{Response, RestClientBuilder, Result, rest_client};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
