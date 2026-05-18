@@ -136,8 +136,9 @@ pub use http;
 /// application code that defines several Catnap traits in one module.
 pub mod prelude {
     pub use crate::{
-        Error, MediaOperation, QueryParamStyle, Response, RestClientBuilder, Result, consumes,
-        delete, get, head, header, options, patch, path, post, produces, put, query, rest_client,
+        Error, MediaOperation, QueryParamStyle, Response, ResponseExceptionContext,
+        ResponseExceptionMapper, RestClientBuilder, Result, consumes, delete, get, head, header,
+        options, patch, path, post, produces, put, query, rest_client,
     };
 }
 
@@ -150,6 +151,7 @@ use serde::de::DeserializeOwned;
 use std::error::Error as StdError;
 use std::fmt::{self, Display};
 use std::marker::PhantomData;
+use std::sync::Arc;
 use std::time::Duration;
 use tracing::{Level, debug};
 use url::Url;
@@ -220,15 +222,25 @@ pub enum Error {
     /// XML request serialization failed.
     #[cfg(feature = "xml")]
     XmlSerialize(quick_xml::se::SeError),
-    /// A typed request returned a non-success HTTP status.
+    /// A typed request returned an HTTP status `>= 400`.
     ///
     /// Methods returning [`Response`] leave status handling to the caller.
     Http {
-        /// The non-success HTTP status.
+        /// The HTTP error status.
         status: StatusCode,
         /// The response body decoded as UTF-8 lossily.
         body: String,
     },
+    /// A custom response exception mapper converted an HTTP response to an
+    /// application-specific error.
+    MappedResponse(Box<dyn StdError + Send + Sync>),
+}
+
+impl Error {
+    /// Wraps an application error returned by a response exception mapper.
+    pub fn mapped_response(source: impl StdError + Send + Sync + 'static) -> Self {
+        Self::MappedResponse(Box::new(source))
+    }
 }
 
 /// Operation that required media type support.
@@ -285,6 +297,7 @@ impl Display for Error {
             #[cfg(feature = "xml")]
             Self::XmlSerialize(source) => write!(formatter, "XML serialization failed: {source}"),
             Self::Http { status, body } => write!(formatter, "HTTP {status}: {body}"),
+            Self::MappedResponse(source) => write!(formatter, "{source}"),
         }
     }
 }
@@ -302,6 +315,7 @@ impl StdError for Error {
             Self::XmlDeserialize(source) => Some(source),
             #[cfg(feature = "xml")]
             Self::XmlSerialize(source) => Some(source),
+            Self::MappedResponse(source) => Some(source.as_ref()),
             Self::MissingBaseUrl
             | Self::InvalidHeaderName(_)
             | Self::UnsupportedMediaType { .. }
@@ -353,6 +367,80 @@ pub enum QueryParamStyle {
     CommaSeparated,
     /// `key[]=value1&key[]=value2`
     ArrayPairs,
+}
+
+type ResponseExceptionMapperFn =
+    dyn for<'a> Fn(&ResponseExceptionContext<'a>) -> Option<Error> + Send + Sync;
+
+/// Ordered mapper that can turn an HTTP response into an application error.
+///
+/// Mappers with lower priority values run first. If every custom mapper
+/// returns `None`, Catnap's default mapper converts statuses `>= 400` to
+/// [`Error::Http`].
+#[derive(Clone)]
+pub struct ResponseExceptionMapper {
+    priority: i32,
+    mapper: Arc<ResponseExceptionMapperFn>,
+}
+
+impl ResponseExceptionMapper {
+    /// Creates a mapper with the given priority.
+    pub fn new(
+        priority: i32,
+        mapper: impl for<'a> Fn(&ResponseExceptionContext<'a>) -> Option<Error> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            priority,
+            mapper: Arc::new(mapper),
+        }
+    }
+
+    /// Returns the mapper priority. Lower values run first.
+    pub fn priority(&self) -> i32 {
+        self.priority
+    }
+
+    fn map_response(&self, response: &ResponseExceptionContext<'_>) -> Option<Error> {
+        (self.mapper)(response)
+    }
+}
+
+impl std::fmt::Debug for ResponseExceptionMapper {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ResponseExceptionMapper")
+            .field("priority", &self.priority)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Buffered HTTP response data available to response exception mappers.
+pub struct ResponseExceptionContext<'a> {
+    status: StatusCode,
+    headers: &'a HeaderMap,
+    body: &'a [u8],
+}
+
+impl ResponseExceptionContext<'_> {
+    /// Returns the HTTP response status.
+    pub fn status(&self) -> StatusCode {
+        self.status
+    }
+
+    /// Returns the HTTP response headers.
+    pub fn headers(&self) -> &HeaderMap {
+        self.headers
+    }
+
+    /// Returns the raw buffered response body.
+    pub fn body(&self) -> &[u8] {
+        self.body
+    }
+
+    /// Decodes the buffered body as UTF-8, replacing invalid bytes.
+    pub fn body_text_lossy(&self) -> String {
+        String::from_utf8_lossy(self.body).into_owned()
+    }
 }
 
 /// Builder used by generated clients.
@@ -457,6 +545,27 @@ impl<T> RestClientBuilder<T> {
         self.config.query_param_style = style;
         self
     }
+
+    /// Registers a response exception mapper for typed response methods.
+    ///
+    /// Mappers with lower priority values run first. The first mapper that
+    /// returns `Some(Error)` controls the request result.
+    pub fn response_exception_mapper(
+        mut self,
+        priority: i32,
+        mapper: impl for<'a> Fn(&ResponseExceptionContext<'a>) -> Option<Error> + Send + Sync + 'static,
+    ) -> Self {
+        self.config
+            .response_exception_mappers
+            .push(ResponseExceptionMapper::new(priority, mapper));
+        self
+    }
+
+    /// Disables Catnap's default typed-response mapper for statuses `>= 400`.
+    pub fn disable_default_response_exception_mapper(mut self) -> Self {
+        self.config.default_response_exception_mapper = false;
+        self
+    }
 }
 
 impl<T> RestClientBuilder<T>
@@ -505,7 +614,7 @@ pub trait BuildFromConfig: Sized {
 }
 
 /// Runtime configuration consumed by generated clients.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct RestClientConfig {
     /// Base URL used to resolve generated request paths.
     pub base_url: Option<Url>,
@@ -519,6 +628,25 @@ pub struct RestClientConfig {
     pub connect_timeout: Option<Duration>,
     /// Encoding style for repeated query parameters.
     pub query_param_style: QueryParamStyle,
+    /// Custom response exception mappers for typed response methods.
+    pub response_exception_mappers: Vec<ResponseExceptionMapper>,
+    /// Whether statuses `>= 400` are mapped to [`Error::Http`] by default.
+    pub default_response_exception_mapper: bool,
+}
+
+impl Default for RestClientConfig {
+    fn default() -> Self {
+        Self {
+            base_url: None,
+            default_headers: HeaderMap::default(),
+            follow_redirects: false,
+            timeout: None,
+            connect_timeout: None,
+            query_param_style: QueryParamStyle::default(),
+            response_exception_mappers: Vec::new(),
+            default_response_exception_mapper: true,
+        }
+    }
 }
 
 /// Runtime client used by generated implementations.
@@ -531,6 +659,8 @@ pub struct RestClient {
     client: reqwest::Client,
     default_headers: HeaderMap,
     query_param_style: QueryParamStyle,
+    response_exception_mappers: Vec<ResponseExceptionMapper>,
+    default_response_exception_mapper: bool,
 }
 
 impl RestClient {
@@ -554,11 +684,16 @@ impl RestClient {
             client = client.connect_timeout(timeout);
         }
 
+        let mut response_exception_mappers = config.response_exception_mappers;
+        response_exception_mappers.sort_by_key(ResponseExceptionMapper::priority);
+
         Ok(Self {
             base_url,
             client: client.build()?,
             default_headers: config.default_headers,
             query_param_style: config.query_param_style,
+            response_exception_mappers,
+            default_response_exception_mapper: config.default_response_exception_mapper,
         })
     }
 
@@ -575,6 +710,8 @@ impl RestClient {
             builder: self.client.request(method, url),
             query_param_style: self.query_param_style,
             query_params: Vec::new(),
+            response_exception_mappers: self.response_exception_mappers.clone(),
+            default_response_exception_mapper: self.default_response_exception_mapper,
         }
         .headers(self.default_headers.clone()))
     }
@@ -585,6 +722,8 @@ pub struct RequestBuilder {
     builder: reqwest::RequestBuilder,
     query_param_style: QueryParamStyle,
     query_params: Vec<(String, String)>,
+    response_exception_mappers: Vec<ResponseExceptionMapper>,
+    default_response_exception_mapper: bool,
 }
 
 impl RequestBuilder {
@@ -736,7 +875,11 @@ impl RequestBuilder {
                 "received HTTP response"
             );
         }
-        Ok(BufferedResponse { status, body })
+        Ok(BufferedResponse {
+            status,
+            headers,
+            body,
+        })
     }
 
     /// Sends the request and returns a raw streaming response.
@@ -749,16 +892,20 @@ impl RequestBuilder {
 
     /// Sends the request and deserializes a JSON response body.
     ///
-    /// Non-success statuses return [`Error::Http`]. This method requires the
+    /// Statuses `>= 400` return [`Error::Http`] by default. This method requires the
     /// `json` feature.
     pub async fn send_json<T: DeserializeOwned>(self) -> Result<T> {
         #[cfg(feature = "json")]
         {
+            let response_exception_mappers = self.response_exception_mappers.clone();
+            let default_response_exception_mapper = self.default_response_exception_mapper;
             let response = self.send_buffered().await?;
-            let status = response.status;
-            if !status.is_success() {
-                let body = response.body_text();
-                return Err(Error::Http { status, body });
+            if let Some(error) = map_response_exception(
+                &response,
+                &response_exception_mappers,
+                default_response_exception_mapper,
+            ) {
+                return Err(error);
             }
             Ok(serde_json::from_slice(&response.body)?)
         }
@@ -775,30 +922,39 @@ impl RequestBuilder {
 
     /// Sends the request and decodes the response body as text.
     ///
-    /// Non-success statuses return [`Error::Http`].
+    /// Statuses `>= 400` return [`Error::Http`] by default.
     pub async fn send_text(self) -> Result<String> {
+        let response_exception_mappers = self.response_exception_mappers.clone();
+        let default_response_exception_mapper = self.default_response_exception_mapper;
         let response = self.send_buffered().await?;
-        let status = response.status;
-        if !status.is_success() {
-            let body = response.body_text();
-            return Err(Error::Http { status, body });
+        if let Some(error) = map_response_exception(
+            &response,
+            &response_exception_mappers,
+            default_response_exception_mapper,
+        ) {
+            return Err(error);
         }
-        Ok(response.body_text())
+        Ok(response.into_body_text())
     }
 
     /// Sends the request and deserializes an XML response body.
     ///
-    /// Non-success statuses return [`Error::Http`]. This method requires the
+    /// Statuses `>= 400` return [`Error::Http`] by default. This method requires the
     /// `xml` feature.
     pub async fn send_xml<T: DeserializeOwned>(self) -> Result<T> {
         #[cfg(feature = "xml")]
         {
+            let response_exception_mappers = self.response_exception_mappers.clone();
+            let default_response_exception_mapper = self.default_response_exception_mapper;
             let response = self.send_buffered().await?;
-            let status = response.status;
-            let body = response.body_text();
-            if !status.is_success() {
-                return Err(Error::Http { status, body });
+            if let Some(error) = map_response_exception(
+                &response,
+                &response_exception_mappers,
+                default_response_exception_mapper,
+            ) {
+                return Err(error);
             }
+            let body = response.into_body_text();
             Ok(quick_xml::de::from_str(&body)?)
         }
 
@@ -814,16 +970,42 @@ impl RequestBuilder {
 
     /// Sends the request and expects only a successful status.
     ///
-    /// Non-success statuses return [`Error::Http`].
+    /// Statuses `>= 400` return [`Error::Http`] by default.
     pub async fn send_empty(self) -> Result<()> {
+        let response_exception_mappers = self.response_exception_mappers.clone();
+        let default_response_exception_mapper = self.default_response_exception_mapper;
         let response = self.send_buffered().await?;
-        let status = response.status;
-        if !status.is_success() {
-            let body = response.body_text();
-            return Err(Error::Http { status, body });
+        if let Some(error) = map_response_exception(
+            &response,
+            &response_exception_mappers,
+            default_response_exception_mapper,
+        ) {
+            return Err(error);
         }
         Ok(())
     }
+}
+
+fn map_response_exception(
+    response: &BufferedResponse,
+    response_exception_mappers: &[ResponseExceptionMapper],
+    default_response_exception_mapper: bool,
+) -> Option<Error> {
+    let context = response.exception_context();
+    for mapper in response_exception_mappers {
+        if let Some(error) = mapper.map_response(&context) {
+            return Some(error);
+        }
+    }
+
+    if default_response_exception_mapper && response.status.as_u16() >= 400 {
+        return Some(Error::Http {
+            status: response.status,
+            body: response.body_text_lossy(),
+        });
+    }
+
+    None
 }
 
 struct LoggedHeaders<'a>(&'a HeaderMap);
@@ -873,11 +1055,24 @@ impl std::fmt::Debug for LoggedBody<'_> {
 
 struct BufferedResponse {
     status: StatusCode,
+    headers: HeaderMap,
     body: Vec<u8>,
 }
 
 impl BufferedResponse {
-    fn body_text(self) -> String {
+    fn exception_context(&self) -> ResponseExceptionContext<'_> {
+        ResponseExceptionContext {
+            status: self.status,
+            headers: &self.headers,
+            body: &self.body,
+        }
+    }
+
+    fn body_text_lossy(&self) -> String {
+        String::from_utf8_lossy(&self.body).into_owned()
+    }
+
+    fn into_body_text(self) -> String {
         String::from_utf8_lossy(&self.body).into_owned()
     }
 }
@@ -886,7 +1081,7 @@ impl BufferedResponse {
 ///
 /// Returning `Result<Response>` from a generated trait method leaves status and
 /// body handling to the caller. Unlike typed response methods, raw responses do
-/// not turn non-2xx statuses into [`Error::Http`].
+/// do not apply response exception mapping.
 pub struct Response {
     inner: ResponseInner,
 }

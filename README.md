@@ -15,7 +15,7 @@ Add catnap to your project:
 
 ```toml
 [dependencies]
-catnap = "0.5"
+catnap = "0.6"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
@@ -246,8 +246,8 @@ trait Health {
 }
 ```
 
-For status-only calls, return `Result<()>`. Catnap treats non-2xx statuses as
-`Error::Http`.
+For status-only calls, return `Result<()>`. Catnap treats statuses `>= 400` as
+`Error::Http` by default.
 
 For custom handling, return `Result<catnap::Response>` and read the raw response
 yourself:
@@ -268,7 +268,7 @@ XML is optional. Enable the `xml` feature and use `#[consumes]` or `#[produces]`
 with `application/xml` or `text/xml`:
 
 ```toml
-catnap = { version = "0.5", features = ["xml"] }
+catnap = { version = "0.6", features = ["xml"] }
 ```
 
 ```rust
@@ -322,6 +322,7 @@ The builder configures:
 - Connect timeout
 - Total request timeout
 - Repeated query parameter encoding
+- Response exception mapping
 
 Generated clients are cloneable. Clones share the underlying `reqwest::Client`.
 
@@ -338,10 +339,48 @@ Common error variants include:
 - `UnsupportedMediaType` when a feature or media type is not supported
 - `Request` for `reqwest` transport errors
 - `JsonDeserialize` and `XmlDeserialize` for response decoding errors
-- `Http` for non-success HTTP responses in typed response methods
+- `Http` for HTTP statuses `>= 400` in typed response methods
+- `MappedResponse` for application errors returned by response exception mappers
 
-Raw `Response` methods do not convert non-2xx statuses into `Error::Http`.
-Inspect the status yourself when returning `Result<Response>`.
+Raw `Response` methods do not apply response exception mapping. Inspect the
+status yourself when returning `Result<Response>`.
+
+Custom response exception mappers can inspect the buffered status, headers, and
+body before typed deserialization:
+
+```rust
+use catnap::{Error, ResponseExceptionContext};
+use std::{error::Error as StdError, fmt};
+
+#[derive(Debug)]
+struct RateLimited;
+
+impl fmt::Display for RateLimited {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("rate limited")
+    }
+}
+
+impl StdError for RateLimited {}
+
+let client = UsersClient::builder()
+    .base_url("https://api.example.com")?
+    .response_exception_mapper(100, |response: &ResponseExceptionContext<'_>| {
+        if response.status() == catnap::http::StatusCode::TOO_MANY_REQUESTS {
+            Some(Error::mapped_response(RateLimited))
+        } else {
+            None
+        }
+    })
+    .build()?;
+# use catnap::{get, rest_client, Result};
+# #[rest_client]
+# trait Users {
+#     #[get("/users")]
+#     async fn list(&self) -> Result<()>;
+# }
+# Ok::<_, catnap::Error>(())
+```
 
 ## Logging
 
@@ -383,25 +422,25 @@ Optional features:
 Minimal HTTP-only install without default features:
 
 ```toml
-catnap = { version = "0.5", default-features = false }
+catnap = { version = "0.6", default-features = false }
 ```
 
 JSON without basic auth or TLS:
 
 ```toml
-catnap = { version = "0.5", default-features = false, features = ["json"] }
+catnap = { version = "0.6", default-features = false, features = ["json"] }
 ```
 
 JSON with HTTPS but without basic auth:
 
 ```toml
-catnap = { version = "0.5", default-features = false, features = ["json", "tls-rustls"] }
+catnap = { version = "0.6", default-features = false, features = ["json", "tls-rustls"] }
 ```
 
 JSON and XML:
 
 ```toml
-catnap = { version = "0.5", features = ["xml"] }
+catnap = { version = "0.6", features = ["xml"] }
 ```
 
 ## Examples

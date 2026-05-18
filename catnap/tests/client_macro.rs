@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
+use std::error::Error as StdError;
+use std::fmt;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::sync::mpsc;
@@ -281,6 +283,90 @@ async fn typed_responses_return_http_errors_with_bodies() -> Result<()> {
 }
 
 #[tokio::test]
+async fn default_response_exception_mapper_allows_3xx_typed_responses() -> Result<()> {
+    let server = TestServer::spawn(
+        "HTTP/1.1 302 Found\r\nContent-Type: application/json\r\nContent-Length: 14\r\n\r\n{\"id\":\"moved\"}",
+    );
+
+    let client = UsersClient::builder()
+        .base_url(server.base_url())?
+        .build()?;
+
+    let user = client.get("moved").await?;
+
+    let request = server.request();
+    assert_eq!(request.line, "GET /users/moved HTTP/1.1");
+    assert_eq!(user.id, "moved");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn default_response_exception_mapper_can_be_disabled() -> Result<()> {
+    let server = TestServer::spawn(
+        "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: 16\r\n\r\n{\"id\":\"missing\"}",
+    );
+
+    let client = UsersClient::builder()
+        .base_url(server.base_url())?
+        .disable_default_response_exception_mapper()
+        .build()?;
+
+    let user = client.get("missing").await?;
+
+    let request = server.request();
+    assert_eq!(request.line, "GET /users/missing HTTP/1.1");
+    assert_eq!(user.id, "missing");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn custom_response_exception_mappers_run_by_priority() -> Result<()> {
+    let server = TestServer::spawn(
+        "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 30\r\nContent-Type: text/plain\r\nContent-Length: 9\r\n\r\nslow down",
+    );
+
+    let client = UsersClient::builder()
+        .base_url(server.base_url())?
+        .response_exception_mapper(100, |response| {
+            if response.status() == catnap::http::StatusCode::TOO_MANY_REQUESTS {
+                Some(Error::mapped_response(RateLimited {
+                    retry_after: response
+                        .headers()
+                        .get("retry-after")
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or_default()
+                        .to_owned(),
+                    body: response.body_text_lossy(),
+                }))
+            } else {
+                None
+            }
+        })
+        .response_exception_mapper(500, |response| {
+            if response.status().as_u16() >= 400 {
+                Some(Error::mapped_response(FallbackMappedResponse))
+            } else {
+                None
+            }
+        })
+        .build()?;
+
+    let error = client.get("limited").await.expect_err("429 should map");
+
+    let request = server.request();
+    assert_eq!(request.line, "GET /users/limited HTTP/1.1");
+    assert!(matches!(
+        error,
+        Error::MappedResponse(ref source)
+            if source.to_string() == "rate limited; retry after 30: slow down"
+    ));
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn unsupported_response_media_type_fails_before_sending() -> Result<()> {
     let client = UnsupportedMediaClient::builder()
         .base_url("http://127.0.0.1:9")?
@@ -301,6 +387,35 @@ async fn unsupported_response_media_type_fails_before_sending() -> Result<()> {
 
     Ok(())
 }
+
+#[derive(Debug)]
+struct RateLimited {
+    retry_after: String,
+    body: String,
+}
+
+impl fmt::Display for RateLimited {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "rate limited; retry after {}: {}",
+            self.retry_after, self.body
+        )
+    }
+}
+
+impl StdError for RateLimited {}
+
+#[derive(Debug)]
+struct FallbackMappedResponse;
+
+impl fmt::Display for FallbackMappedResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("fallback response mapper")
+    }
+}
+
+impl StdError for FallbackMappedResponse {}
 
 struct TestServer {
     base_url: String,
