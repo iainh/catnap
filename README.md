@@ -1,11 +1,30 @@
 # catnap
 
-A Rust REST client experiment inspired by the Eclipse MicroProfile REST Client 4.0 model: define a trait, annotate the HTTP shape, and let generated code handle request construction.
+Catnap is a trait-first REST client for Rust. It is inspired by Eclipse
+MicroProfile REST Client: describe the remote API as a typed interface, annotate
+the HTTP details, and let generated code handle the repetitive request
+construction.
 
-The goal is simple client definitions with little boilerplate:
+Catnap uses `reqwest` at runtime. The value of the crate is the small declarative
+layer around `reqwest`: fewer hand-written URLs, headers, query strings and
+response conversions in application code.
+
+## Quick start
+
+Add catnap to your project:
+
+```toml
+[dependencies]
+catnap = "0.2"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+```
+
+Define a trait for the remote resource and annotate each method with its HTTP
+shape:
 
 ```rust
-use catnap::{consumes, get, path, post, produces, rest_client, Result};
+use catnap::{get, path, post, rest_client, Result};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
@@ -29,62 +48,356 @@ trait Users {
 
     #[post("")]
     async fn create(&self, user: &NewUser) -> Result<User>;
-
-    #[get("/{id}/name")]
-    #[produces("text/plain")]
-    async fn name(&self, #[path("id")] id: &str) -> Result<String>;
-
-    #[post("/xml")]
-    #[consumes("application/xml")]
-    #[produces("application/xml")]
-    async fn create_xml(&self, user: &User) -> Result<User>;
 }
 
 async fn example() -> Result<()> {
     let client = UsersClient::builder()
         .base_url("https://api.example.com")?
-        .header("Authorization", "Bearer token")?
+        .header("User-Agent", "my-service")?
         .build()?;
 
     let user = client.get("42").await?;
+    println!("{user:?}");
+
     Ok(())
 }
 ```
 
-JSON support is enabled by default. Enable XML support with:
+The `#[rest_client]` macro keeps the original trait and generates a client named
+`<TraitName>Client`. In the example above, `UsersClient` implements `Users`.
 
-```toml
-catnap = { version = "0.1", features = ["xml"] }
+## Design model
+
+MicroProfile REST Client uses annotated Java interfaces such as `@GET`,
+`@Path`, `@QueryParam` and `@HeaderParam`. Catnap follows the same shape in
+Rust:
+
+- `#[rest_client]` defines a typed remote resource.
+- `#[get]`, `#[post]`, `#[put]`, `#[patch]`, `#[delete]`, `#[options]` and
+  `#[head]` define HTTP methods.
+- `#[path("name")]` replaces `{name}` placeholders in the request path.
+- `#[query("name")]` adds query parameters.
+- `#[header("Name")]` adds per-request headers.
+- `#[consumes("type/subtype")]` selects request body serialization.
+- `#[produces("type/subtype")]` selects response deserialization.
+
+Catnap stays idiomatic for Rust by using explicit async trait methods, a typed
+`catnap::Result<T>`, feature-gated serialization support and normal `serde`
+models.
+
+## Paths and parameters
+
+Resource-level paths are declared on the trait. Method-level paths are declared
+on HTTP method attributes. Catnap joins them and percent-encodes path parameter
+values as single path segments.
+
+```rust
+use catnap::{get, path, query, rest_client, Result};
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize)]
+struct Issue {
+    id: String,
+    title: String,
+}
+
+#[rest_client(path = "/repos/{owner}/{repo}")]
+trait Issues {
+    #[get("/issues")]
+    async fn list(
+        &self,
+        #[path("owner")] owner: &str,
+        #[path("repo")] repo: &str,
+        #[query("state")] state: &str,
+    ) -> Result<Vec<Issue>>;
+}
 ```
 
-For builds without JSON support:
+If a path contains `{owner}`, the method must have a matching
+`#[path("owner")]` argument. Extra `#[path]` arguments that do not match a
+placeholder are compile errors.
 
-```toml
-catnap = { version = "0.1", default-features = false }
+## Query parameter style
+
+Repeated query parameters can be encoded in three common formats:
+
+```rust
+use catnap::{QueryParamStyle, Result};
+
+async fn example() -> Result<()> {
+    let client = SearchClient::builder()
+        .base_url("https://api.example.com")?
+        .query_param_style(QueryParamStyle::MultiPairs)
+        .build()?;
+
+    Ok(())
+}
+# use catnap::{get, query, rest_client};
+# #[rest_client]
+# trait Search {
+#     #[get("/search")]
+#     async fn search(&self, #[query("tag")] tag: &str) -> Result<()>;
+# }
 ```
 
-## Current Scope
+The supported styles are:
 
-This first slice supports:
+- `MultiPairs`: `tag=rust&tag=http`
+- `CommaSeparated`: `tag=rust,http`
+- `ArrayPairs`: `tag[]=rust&tag[]=http`
 
-- Trait-based client definitions via `#[rest_client]`
-- HTTP method annotations: `#[get]`, `#[post]`, `#[put]`, `#[patch]`, `#[delete]`, `#[options]`, `#[head]`
-- Path parameters with `#[path("name")]`
-- Query parameters with `#[query("name")]`
-- Header parameters with `#[header("Name")]`
-- Media types with `#[consumes("...")]` and `#[produces("...")]`, defaulting to `application/json`
-- JSON request/response bodies enabled by the default `json` feature
-- Optional XML request/response bodies with the `xml` feature
-- `text/plain` string responses, raw `Response`, and `Result<()>`
-- Builder configuration for base URL, default headers, redirect handling, timeout, and query parameter style
+## Headers and authentication
 
-The design intentionally mirrors MicroProfile's developer experience while staying idiomatic for Rust: explicit async traits, typed `Result`, and feature-gated media support.
+Use builder headers for values that apply to every request:
 
-Catnap emits debug-level `tracing` events for outgoing requests and incoming responses. Sensitive headers such as `Authorization` and `Cookie` are redacted.
+```rust
+let client = UsersClient::builder()
+    .base_url("https://api.example.com")?
+    .header("Authorization", "Bearer token")?
+    .build()?;
+# use catnap::{get, rest_client, Result};
+# #[rest_client]
+# trait Users {
+#     #[get("/users")]
+#     async fn list(&self) -> Result<()>;
+# }
+# Ok::<_, catnap::Error>(())
+```
+
+Use method parameters for values that change per request:
+
+```rust
+use catnap::{get, header, path, rest_client, Result};
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize)]
+struct User {
+    id: String,
+}
+
+#[rest_client(path = "/users")]
+trait Users {
+    #[get("/{id}")]
+    async fn get(
+        &self,
+        #[path("id")] id: &str,
+        #[header("X-Request-Id")] request_id: &str,
+    ) -> Result<User>;
+}
+```
+
+Basic authentication is available through the default `basic-auth` feature:
+
+```rust
+let client = HttpBinClient::builder()
+    .base_url("https://httpbin.io")?
+    .basic_auth("catnap", "secret")?
+    .build()?;
+# use catnap::{get, rest_client, Result};
+# #[rest_client]
+# trait HttpBin {
+#     #[get("/get")]
+#     async fn get(&self) -> Result<()>;
+# }
+# Ok::<_, catnap::Error>(())
+```
+
+For bearer tokens, API keys or custom authentication schemes, set the required
+header directly with `.header(...)` or a `#[header(...)]` parameter.
+
+## Request and response bodies
+
+Catnap defaults to JSON. An unannotated method parameter is treated as the
+request body, and the `Result<T>` response type controls deserialization.
+
+```rust
+use catnap::{post, rest_client, Result};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Serialize)]
+struct CreateTodo {
+    title: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct Todo {
+    id: String,
+    title: String,
+}
+
+#[rest_client(path = "/todos")]
+trait Todos {
+    #[post("")]
+    async fn create(&self, todo: &CreateTodo) -> Result<Todo>;
+}
+```
+
+For plain text responses, mark the method with `#[produces("text/plain")]` and
+return `String`:
+
+```rust
+use catnap::{get, produces, rest_client, Result};
+
+#[rest_client]
+trait Health {
+    #[get("/health")]
+    #[produces("text/plain")]
+    async fn health(&self) -> Result<String>;
+}
+```
+
+For status-only calls, return `Result<()>`. Catnap treats non-2xx statuses as
+`Error::Http`.
+
+For custom handling, return `Result<catnap::Response>` and read the raw response
+yourself:
+
+```rust
+use catnap::{get, Response, Result, rest_client};
+
+#[rest_client]
+trait Downloads {
+    #[get("/archive")]
+    async fn archive(&self) -> Result<Response>;
+}
+```
+
+## XML support
+
+XML is optional. Enable the `xml` feature and use `#[consumes]` or `#[produces]`
+with `application/xml` or `text/xml`:
+
+```toml
+catnap = { version = "0.2", features = ["xml"] }
+```
+
+```rust
+use catnap::{get, produces, rest_client, Result};
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize)]
+struct Feed {
+    title: String,
+}
+
+#[rest_client]
+trait FeedApi {
+    #[get("/feed.xml")]
+    #[produces("application/xml")]
+    async fn feed(&self) -> Result<Feed>;
+}
+```
+
+XML serialization and deserialization use `quick-xml` with `serde`.
+
+## Runtime configuration
+
+Every generated client has a builder:
+
+```rust
+use std::time::Duration;
+
+let client = UsersClient::builder()
+    .base_url("https://api.example.com")?
+    .follow_redirects(true)
+    .timeout(Duration::from_secs(10))
+    .header("User-Agent", "my-service")?
+    .build()?;
+# use catnap::{get, rest_client, Result};
+# #[rest_client]
+# trait Users {
+#     #[get("/users")]
+#     async fn list(&self) -> Result<()>;
+# }
+# Ok::<_, catnap::Error>(())
+```
+
+The builder configures:
+
+- Base URL
+- Default headers
+- Basic authentication
+- Redirect handling
+- Request timeout
+- Repeated query parameter encoding
+
+Generated clients are cloneable. Clones share the underlying `reqwest::Client`.
+
+## Error handling
+
+All generated methods return `catnap::Result<T>`, an alias for
+`Result<T, catnap::Error>`.
+
+Common error variants include:
+
+- `MissingBaseUrl` when `.base_url(...)` was not configured
+- `InvalidBaseUrl` and `InvalidRequestUrl` for URL construction failures
+- `InvalidHeaderName` and `InvalidHeaderValue` for invalid headers
+- `UnsupportedMediaType` when a feature or media type is not supported
+- `Request` for `reqwest` transport errors
+- `JsonDeserialize` and `XmlDeserialize` for response decoding errors
+- `Http` for non-success HTTP responses in typed response methods
+
+Raw `Response` methods do not convert non-2xx statuses into `Error::Http`.
+Inspect the status yourself when returning `Result<Response>`.
+
+## Logging
+
+Catnap emits `tracing` debug events for outgoing requests and incoming
+responses. It logs method, URL, headers and body where the body can be cloned or
+has already been buffered for typed decoding.
+
+Sensitive headers are redacted:
+
+- `Authorization`
+- `Proxy-Authorization`
+- `Cookie`
+- `Set-Cookie`
+
+Install a subscriber in applications or examples to see logs:
+
+```rust
+tracing_subscriber::fmt()
+    .with_env_filter("catnap=debug")
+    .init();
+```
+
+Raw `Response` calls preserve streaming response behaviour and log status and
+headers only. Typed methods buffer response bodies because they need the bytes
+for decoding and error reporting.
+
+## Feature flags
+
+Default features:
+
+- `json`: JSON request and response bodies with `serde_json`
+- `basic-auth`: `RestClientBuilder::basic_auth`
+
+Optional features:
+
+- `xml`: XML request and response bodies with `quick-xml`
+
+Minimal install without default features:
+
+```toml
+catnap = { version = "0.2", default-features = false }
+```
+
+JSON without basic auth:
+
+```toml
+catnap = { version = "0.2", default-features = false, features = ["json"] }
+```
+
+JSON and XML:
+
+```toml
+catnap = { version = "0.2", features = ["xml"] }
+```
 
 ## Examples
 
-The `catnap` crate includes examples using public `httpbin.io` endpoints:
+The crate includes examples using public `httpbin.io` endpoints:
 
 ```sh
 cargo run -p catnap --example httpbin_json
@@ -93,4 +406,15 @@ cargo run -p catnap --example httpbin_basic_auth
 cargo run -p catnap --features xml --example httpbin_xml
 ```
 
-Examples initialize a `tracing-subscriber` logger. Set `RUST_LOG` to override the default `catnap=debug` filter.
+Examples initialize a `tracing-subscriber` logger. Set `RUST_LOG` to override
+the default `catnap=debug` filter.
+
+## Current scope
+
+Catnap currently focuses on the core MicroProfile-style client definition model:
+typed interfaces, method annotations, path/query/header parameters, media type
+selection, builder configuration, basic authentication and tracing.
+
+Provider registration, exception mappers, CDI-style injection, externalized
+configuration and advanced multipart/server-sent-event support are not part of
+the current release.

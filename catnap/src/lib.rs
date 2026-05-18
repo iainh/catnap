@@ -1,7 +1,14 @@
 //! Trait-first REST clients inspired by Eclipse MicroProfile REST Client.
 //!
-//! The main entry point is [`rest_client`], which turns a Rust trait into a
-//! generated reqwest-backed client implementation.
+//! Catnap lets you describe an HTTP API as a Rust trait and derive a small
+//! `reqwest`-backed client from that trait. It is intended for service clients
+//! where the useful abstraction is the remote resource, not repeated manual
+//! request construction.
+//!
+//! The main entry point is [`rest_client`]. It keeps the annotated trait in
+//! place and generates a cloneable client named `<TraitName>Client`.
+//!
+//! # Making a GET request
 //!
 //! ```
 //! use catnap::{get, path, rest_client, RestClientBuilder, Result};
@@ -26,6 +33,91 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! # Defining request bodies
+//!
+//! An unannotated method argument is treated as the request body. JSON is the
+//! default media type when the default `json` feature is enabled.
+//!
+//! ```
+//! use catnap::{post, rest_client, Result};
+//! use serde::{Deserialize, Serialize};
+//!
+//! #[derive(Serialize)]
+//! struct NewUser {
+//!     name: String,
+//! }
+//!
+//! #[derive(Deserialize)]
+//! struct User {
+//!     id: String,
+//!     name: String,
+//! }
+//!
+//! #[rest_client(path = "/users")]
+//! trait Users {
+//!     #[post("")]
+//!     async fn create(&self, user: &NewUser) -> Result<User>;
+//! }
+//! ```
+//!
+//! # Paths, query parameters, and headers
+//!
+//! Use [`path`], [`query`], and [`header`] on method arguments to bind values to
+//! the generated request.
+//!
+//! ```
+//! use catnap::{get, header, path, query, rest_client, Result};
+//! use serde::Deserialize;
+//!
+//! #[derive(Deserialize)]
+//! struct User {
+//!     id: String,
+//! }
+//!
+//! #[rest_client(path = "/tenants/{tenant}")]
+//! trait Users {
+//!     #[get("/users/{id}")]
+//!     async fn get_user(
+//!         &self,
+//!         #[path("tenant")] tenant: &str,
+//!         #[path("id")] id: &str,
+//!         #[query("include")] include: &str,
+//!         #[header("X-Request-Id")] request_id: &str,
+//!     ) -> Result<User>;
+//! }
+//! ```
+//!
+//! # Media types
+//!
+//! Catnap supports JSON by default, plain text responses as [`String`], raw
+//! [`Response`] values, status-only `Result<()>` methods, and optional XML with
+//! the `xml` feature.
+//!
+//! ```
+//! use catnap::{get, produces, rest_client, Result};
+//!
+//! #[rest_client]
+//! trait Health {
+//!     #[get("/health")]
+//!     #[produces("text/plain")]
+//!     async fn health(&self) -> Result<String>;
+//! }
+//! ```
+//!
+//! # Feature flags
+//!
+//! The default features are `json` and `basic-auth`.
+//!
+//! - `json` enables JSON request and response bodies.
+//! - `basic-auth` enables [`RestClientBuilder::basic_auth`].
+//! - `xml` enables XML request and response bodies.
+//!
+//! # Logging
+//!
+//! Catnap emits `tracing` debug events for outgoing requests and incoming
+//! responses. Sensitive headers such as `Authorization`, `Proxy-Authorization`,
+//! `Cookie`, and `Set-Cookie` are redacted.
 
 pub use catnap_macros::{
     consumes, delete, get, head, header, options, patch, path, post, produces, put, query,
@@ -48,7 +140,7 @@ use url::Url;
 #[cfg(feature = "basic-auth")]
 use base64::Engine;
 
-/// Crate-wide result type.
+/// Result type returned by generated clients and runtime helpers.
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[doc(hidden)]
@@ -73,45 +165,69 @@ pub mod __private {
     }
 }
 
-/// Errors produced while building or invoking a generated REST client.
+/// Error type returned while building or invoking a generated REST client.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// A generated client was built without configuring a base URL.
     #[error("base URL is required")]
     MissingBaseUrl,
+    /// The configured base URL could not be parsed.
     #[error("invalid base URL: {0}")]
     InvalidBaseUrl(#[from] url::ParseError),
+    /// A request path could not be joined to the configured base URL.
     #[error("invalid request URL path `{path}`: {source}")]
     InvalidRequestUrl {
+        /// The path passed to the runtime request builder.
         path: String,
         #[source]
+        /// The URL parse error produced while joining the path.
         source: url::ParseError,
     },
+    /// A configured default header name was invalid.
     #[error("invalid HTTP header name `{0}`")]
     InvalidHeaderName(String),
+    /// A configured default header value was invalid.
     #[error("invalid HTTP header value for `{name}`: {source}")]
     InvalidHeaderValue {
+        /// Header name associated with the invalid value.
         name: String,
         #[source]
+        /// The invalid header value error.
         source: http::header::InvalidHeaderValue,
     },
+    /// The selected request or response media type is not supported.
     #[error("unsupported media type `{media_type}` for {operation}")]
     UnsupportedMediaType {
+        /// The operation that required media type support.
         operation: &'static str,
+        /// The unsupported media type.
         media_type: &'static str,
     },
+    /// The underlying `reqwest` request failed.
     #[error("request failed: {0}")]
     Request(#[from] reqwest::Error),
+    /// JSON response deserialization failed.
     #[cfg(feature = "json")]
     #[error("JSON deserialization failed: {0}")]
     JsonDeserialize(#[from] serde_json::Error),
+    /// XML response deserialization failed.
     #[cfg(feature = "xml")]
     #[error("XML deserialization failed: {0}")]
     XmlDeserialize(#[from] quick_xml::de::DeError),
+    /// XML request serialization failed.
     #[cfg(feature = "xml")]
     #[error("XML serialization failed: {0}")]
     XmlSerialize(#[from] quick_xml::se::SeError),
+    /// A typed request returned a non-success HTTP status.
+    ///
+    /// Methods returning [`Response`] leave status handling to the caller.
     #[error("HTTP {status}: {body}")]
-    Http { status: StatusCode, body: String },
+    Http {
+        /// The non-success HTTP status.
+        status: StatusCode,
+        /// The response body decoded as UTF-8 lossily.
+        body: String,
+    },
 }
 
 /// How repeated query parameters should be encoded.
@@ -126,7 +242,10 @@ pub enum QueryParamStyle {
     ArrayPairs,
 }
 
-/// A typed REST client builder.
+/// Builder used by generated clients.
+///
+/// Every `#[rest_client]` trait generates a client with a `builder()` method
+/// that returns `RestClientBuilder<GeneratedClient>`.
 #[derive(Debug, Clone)]
 pub struct RestClientBuilder<T> {
     config: RestClientConfig,
@@ -140,6 +259,10 @@ impl<T> Default for RestClientBuilder<T> {
 }
 
 impl<T> RestClientBuilder<T> {
+    /// Creates an empty builder.
+    ///
+    /// Most callers should use the generated `YourClient::builder()` method so
+    /// the target client type can be inferred.
     pub fn new() -> Self {
         Self {
             config: RestClientConfig::default(),
@@ -147,11 +270,19 @@ impl<T> RestClientBuilder<T> {
         }
     }
 
+    /// Sets the base URL used by all generated request paths.
+    ///
+    /// Request paths are joined against this URL. A trailing slash is added to
+    /// the path component when needed so resource paths join predictably.
     pub fn base_url(mut self, base_url: impl AsRef<str>) -> Result<Self> {
         self.config.base_url = Some(Url::parse(base_url.as_ref())?);
         Ok(self)
     }
 
+    /// Adds or replaces a default header sent with every request.
+    ///
+    /// Use this for stable headers such as `User-Agent`, bearer tokens or API
+    /// keys. Use the [`header`] parameter attribute for per-request values.
     pub fn header(mut self, name: impl AsRef<str>, value: impl AsRef<str>) -> Result<Self> {
         let name_text = name.as_ref();
         let name = HeaderName::from_bytes(name_text.as_bytes())
@@ -165,6 +296,10 @@ impl<T> RestClientBuilder<T> {
         Ok(self)
     }
 
+    /// Configures HTTP Basic authentication for every request.
+    ///
+    /// This method is available when the `basic-auth` feature is enabled, which
+    /// is part of the default feature set.
     #[cfg(feature = "basic-auth")]
     pub fn basic_auth(self, username: impl AsRef<str>, password: impl AsRef<str>) -> Result<Self> {
         let credentials = format!("{}:{}", username.as_ref(), password.as_ref());
@@ -172,16 +307,22 @@ impl<T> RestClientBuilder<T> {
         self.header("Authorization", format!("Basic {encoded}"))
     }
 
+    /// Enables or disables redirect following.
+    ///
+    /// Redirects are disabled by default. When enabled, catnap uses
+    /// `reqwest::redirect::Policy::limited(10)`.
     pub fn follow_redirects(mut self, enabled: bool) -> Self {
         self.config.follow_redirects = enabled;
         self
     }
 
+    /// Sets a request timeout on the underlying `reqwest::Client`.
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.config.timeout = Some(timeout);
         self
     }
 
+    /// Sets how repeated query parameters are encoded.
     pub fn query_param_style(mut self, style: QueryParamStyle) -> Self {
         self.config.query_param_style = style;
         self
@@ -192,6 +333,7 @@ impl<T> RestClientBuilder<T>
 where
     T: BuildFromConfig,
 {
+    /// Builds the generated client.
     pub fn build(self) -> Result<T> {
         T::build_from_config(self.config)
     }
@@ -199,20 +341,29 @@ where
 
 /// Implemented by generated client structs.
 pub trait BuildFromConfig: Sized {
+    /// Builds a generated client from runtime configuration.
     fn build_from_config(config: RestClientConfig) -> Result<Self>;
 }
 
 /// Runtime configuration consumed by generated clients.
 #[derive(Debug, Clone, Default)]
 pub struct RestClientConfig {
+    /// Base URL used to resolve generated request paths.
     pub base_url: Option<Url>,
+    /// Headers applied to every request.
     pub default_headers: HeaderMap,
+    /// Whether the underlying client follows redirects.
     pub follow_redirects: bool,
+    /// Optional request timeout.
     pub timeout: Option<Duration>,
+    /// Encoding style for repeated query parameters.
     pub query_param_style: QueryParamStyle,
 }
 
-/// A reqwest-backed runtime client used by generated implementations.
+/// Runtime client used by generated implementations.
+///
+/// Most applications interact with the generated `<TraitName>Client` rather
+/// than this type directly.
 #[derive(Debug, Clone)]
 pub struct RestClient {
     base_url: Url,
@@ -222,6 +373,7 @@ pub struct RestClient {
 }
 
 impl RestClient {
+    /// Creates a runtime client from generated-client configuration.
     pub fn from_config(config: RestClientConfig) -> Result<Self> {
         let mut base_url = config.base_url.ok_or(Error::MissingBaseUrl)?;
         if !base_url.path().ends_with('/') {
@@ -246,6 +398,7 @@ impl RestClient {
         })
     }
 
+    /// Starts a request for the given HTTP method and resource path.
     pub fn request(&self, method: Method, path: &str) -> Result<RequestBuilder> {
         let url = self
             .base_url
@@ -269,31 +422,37 @@ pub struct RequestBuilder {
 }
 
 impl RequestBuilder {
+    /// Applies a complete set of headers to the request.
     pub fn headers(mut self, headers: HeaderMap) -> Self {
         self.builder = self.builder.headers(headers);
         self
     }
 
+    /// Adds a single request header.
     pub fn header(mut self, name: &str, value: impl Display) -> Self {
         self.builder = self.builder.header(name, value.to_string());
         self
     }
 
+    /// Sets the `Accept` header.
     pub fn accept(mut self, media_type: &'static str) -> Self {
         self.builder = self.builder.header(ACCEPT, media_type);
         self
     }
 
+    /// Sets the `Content-Type` header.
     pub fn content_type(mut self, media_type: &'static str) -> Self {
         self.builder = self.builder.header(CONTENT_TYPE, media_type);
         self
     }
 
+    /// Adds a query parameter.
     pub fn query_param(mut self, name: &str, value: impl Display) -> Self {
         self.builder = self.builder.query(&[(name, value.to_string())]);
         self
     }
 
+    /// Adds repeated query parameter values according to the configured style.
     pub fn query_params<I, V>(mut self, name: &str, values: I) -> Self
     where
         I: IntoIterator<Item = V>,
@@ -319,6 +478,9 @@ impl RequestBuilder {
         self
     }
 
+    /// Serializes a JSON request body.
+    ///
+    /// This method requires the `json` feature.
     pub fn json<T: Serialize + ?Sized>(self, body: &T) -> Result<Self> {
         #[cfg(feature = "json")]
         {
@@ -338,11 +500,15 @@ impl RequestBuilder {
         }
     }
 
+    /// Sets a plain text request body.
     pub fn text(mut self, body: impl Into<String>) -> Self {
         self.builder = self.builder.body(body.into());
         self
     }
 
+    /// Serializes an XML request body.
+    ///
+    /// This method requires the `xml` feature.
     pub fn xml<T: Serialize + ?Sized>(self, body: &T) -> Result<Self> {
         #[cfg(feature = "xml")]
         {
@@ -393,6 +559,7 @@ impl RequestBuilder {
         Ok(BufferedResponse { status, body })
     }
 
+    /// Sends the request and returns a raw streaming response.
     pub async fn send(self) -> Result<Response> {
         let response = self.send_streaming().await?;
         Ok(Response {
@@ -400,6 +567,10 @@ impl RequestBuilder {
         })
     }
 
+    /// Sends the request and deserializes a JSON response body.
+    ///
+    /// Non-success statuses return [`Error::Http`]. This method requires the
+    /// `json` feature.
     pub async fn send_json<T: DeserializeOwned>(self) -> Result<T> {
         #[cfg(feature = "json")]
         {
@@ -422,6 +593,9 @@ impl RequestBuilder {
         }
     }
 
+    /// Sends the request and decodes the response body as text.
+    ///
+    /// Non-success statuses return [`Error::Http`].
     pub async fn send_text(self) -> Result<String> {
         let response = self.send_buffered().await?;
         let status = response.status;
@@ -432,6 +606,10 @@ impl RequestBuilder {
         Ok(response.body_text())
     }
 
+    /// Sends the request and deserializes an XML response body.
+    ///
+    /// Non-success statuses return [`Error::Http`]. This method requires the
+    /// `xml` feature.
     pub async fn send_xml<T: DeserializeOwned>(self) -> Result<T> {
         #[cfg(feature = "xml")]
         {
@@ -454,6 +632,9 @@ impl RequestBuilder {
         }
     }
 
+    /// Sends the request and expects only a successful status.
+    ///
+    /// Non-success statuses return [`Error::Http`].
     pub async fn send_empty(self) -> Result<()> {
         let response = self.send_buffered().await?;
         let status = response.status;
@@ -533,6 +714,10 @@ impl BufferedResponse {
 }
 
 /// Raw response wrapper for callers that need headers, status, or custom body handling.
+///
+/// Returning `Result<Response>` from a generated trait method leaves status and
+/// body handling to the caller. Unlike typed response methods, raw responses do
+/// not turn non-2xx statuses into [`Error::Http`].
 pub struct Response {
     inner: ResponseInner,
 }
@@ -542,24 +727,30 @@ enum ResponseInner {
 }
 
 impl Response {
+    /// Returns the HTTP status code.
     pub fn status(&self) -> StatusCode {
         match &self.inner {
             ResponseInner::Streaming(response) => response.status(),
         }
     }
 
+    /// Returns the HTTP response headers.
     pub fn headers(&self) -> &HeaderMap {
         match &self.inner {
             ResponseInner::Streaming(response) => response.headers(),
         }
     }
 
+    /// Reads the full response body as text.
     pub async fn text(self) -> Result<String> {
         match self.inner {
             ResponseInner::Streaming(response) => Ok(response.text().await?),
         }
     }
 
+    /// Reads the full response body and deserializes it as JSON.
+    ///
+    /// This method requires the `json` feature.
     pub async fn json<T: DeserializeOwned>(self) -> Result<T> {
         #[cfg(feature = "json")]
         {
@@ -578,6 +769,9 @@ impl Response {
         }
     }
 
+    /// Reads the full response body and deserializes it as XML.
+    ///
+    /// This method requires the `xml` feature.
     pub async fn xml<T: DeserializeOwned>(self) -> Result<T> {
         #[cfg(feature = "xml")]
         {

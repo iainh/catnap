@@ -7,6 +7,11 @@ use syn::{
     parse_macro_input,
 };
 
+/// Generates a reqwest-backed client implementation for an annotated trait.
+///
+/// The generated client is named `<TraitName>Client` and implements the source
+/// trait. The optional `path`, `consumes`, and `produces` arguments define
+/// resource-level defaults for methods.
 #[proc_macro_attribute]
 pub fn rest_client(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as RestClientArgs);
@@ -15,61 +20,73 @@ pub fn rest_client(attr: TokenStream, item: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
+/// Marks a trait method as an HTTP `GET` request.
 #[proc_macro_attribute]
 pub fn get(_: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 
+/// Marks a trait method as an HTTP `POST` request.
 #[proc_macro_attribute]
 pub fn post(_: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 
+/// Marks a trait method as an HTTP `PUT` request.
 #[proc_macro_attribute]
 pub fn put(_: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 
+/// Marks a trait method as an HTTP `PATCH` request.
 #[proc_macro_attribute]
 pub fn patch(_: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 
+/// Marks a trait method as an HTTP `DELETE` request.
 #[proc_macro_attribute]
 pub fn delete(_: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 
+/// Marks a trait method as an HTTP `OPTIONS` request.
 #[proc_macro_attribute]
 pub fn options(_: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 
+/// Marks a trait method as an HTTP `HEAD` request.
 #[proc_macro_attribute]
 pub fn head(_: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 
+/// Binds a method argument to a `{name}` path placeholder.
 #[proc_macro_attribute]
 pub fn path(_: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 
+/// Binds a method argument to a query parameter.
 #[proc_macro_attribute]
 pub fn query(_: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 
+/// Binds a method argument to a request header.
 #[proc_macro_attribute]
 pub fn header(_: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 
+/// Sets the media type used to serialize the request body.
 #[proc_macro_attribute]
 pub fn consumes(_: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 
+/// Sets the media type used to deserialize the response body.
 #[proc_macro_attribute]
 pub fn produces(_: TokenStream, item: TokenStream) -> TokenStream {
     item
