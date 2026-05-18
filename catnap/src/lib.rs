@@ -28,10 +28,12 @@
 //! ```
 
 pub use catnap_macros::{
-    delete, get, head, header, options, patch, path, post, put, query, rest_client,
+    consumes, delete, get, head, header, options, patch, path, post, produces, put, query,
+    rest_client,
 };
 pub use http;
 
+use http::header::{ACCEPT, CONTENT_TYPE};
 use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use reqwest::redirect::Policy;
@@ -87,6 +89,11 @@ pub enum Error {
         name: String,
         #[source]
         source: http::header::InvalidHeaderValue,
+    },
+    #[error("unsupported media type `{media_type}` for {operation}")]
+    UnsupportedMediaType {
+        operation: &'static str,
+        media_type: &'static str,
     },
     #[error("request failed: {0}")]
     Request(#[from] reqwest::Error),
@@ -252,6 +259,16 @@ impl RequestBuilder {
         self
     }
 
+    pub fn accept(mut self, media_type: &'static str) -> Self {
+        self.builder = self.builder.header(ACCEPT, media_type);
+        self
+    }
+
+    pub fn content_type(mut self, media_type: &'static str) -> Self {
+        self.builder = self.builder.header(CONTENT_TYPE, media_type);
+        self
+    }
+
     pub fn query_param(mut self, name: &str, value: impl Display) -> Self {
         self.builder = self.builder.query(&[(name, value.to_string())]);
         self
@@ -287,6 +304,11 @@ impl RequestBuilder {
         self
     }
 
+    pub fn text(mut self, body: impl Into<String>) -> Self {
+        self.builder = self.builder.body(body.into());
+        self
+    }
+
     pub async fn send(self) -> Result<Response> {
         let response = self.builder.send().await?;
         Ok(Response { inner: response })
@@ -300,6 +322,16 @@ impl RequestBuilder {
             return Err(Error::Http { status, body });
         }
         Ok(response.json::<T>().await?)
+    }
+
+    pub async fn send_text(self) -> Result<String> {
+        let response = self.builder.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(Error::Http { status, body });
+        }
+        Ok(response.text().await?)
     }
 
     pub async fn send_empty(self) -> Result<()> {

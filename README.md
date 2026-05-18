@@ -5,7 +5,7 @@ A Rust REST client experiment inspired by the Eclipse MicroProfile REST Client 4
 The goal is simple client definitions with little boilerplate:
 
 ```rust
-use catnap::{get, path, post, rest_client, Result};
+use catnap::{get, path, post, produces, rest_client, Result};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
@@ -29,6 +29,10 @@ trait Users {
 
     #[post("")]
     async fn create(&self, user: &NewUser) -> Result<User>;
+
+    #[get("/{id}/name")]
+    #[produces("text/plain")]
+    async fn name(&self, #[path("id")] id: &str) -> Result<String>;
 }
 
 async fn example() -> Result<()> {
@@ -51,8 +55,9 @@ This first slice supports:
 - Path parameters with `#[path("name")]`
 - Query parameters with `#[query("name")]`
 - Header parameters with `#[header("Name")]`
+- Media types with `#[consumes("...")]` and `#[produces("...")]`, defaulting to `application/json`
 - JSON request bodies from the first unannotated argument
-- JSON response decoding, raw `Response`, and `Result<()>`
+- JSON response decoding, `text/plain` string responses, raw `Response`, and `Result<()>`
 - Builder configuration for base URL, default headers, redirect handling, timeout, and query parameter style
 
 The design intentionally mirrors MicroProfile's developer experience while staying idiomatic for Rust: explicit async traits, typed `Result`, and serde-powered JSON.

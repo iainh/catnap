@@ -65,26 +65,59 @@ pub fn header(_: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 
+#[proc_macro_attribute]
+pub fn consumes(_: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+
+#[proc_macro_attribute]
+pub fn produces(_: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+
 struct RestClientArgs {
     path: String,
+    consumes: String,
+    produces: String,
 }
 
 impl syn::parse::Parse for RestClientArgs {
     fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Self> {
+        let mut args = Self {
+            path: String::new(),
+            consumes: APPLICATION_JSON.to_owned(),
+            produces: APPLICATION_JSON.to_owned(),
+        };
         if input.is_empty() {
-            return Ok(Self {
-                path: String::new(),
-            });
+            return Ok(args);
         }
-        let key: Ident = input.parse()?;
-        if key != "path" {
-            return Err(syn::Error::new(key.span(), "expected `path = \"...\"`"));
+
+        while !input.is_empty() {
+            let key: Ident = input.parse()?;
+            input.parse::<syn::Token![=]>()?;
+            let value: LitStr = input.parse()?;
+            match key.to_string().as_str() {
+                "path" => args.path = value.value(),
+                "consumes" => args.consumes = validate_media_type(&value)?,
+                "produces" => args.produces = validate_media_type(&value)?,
+                _ => {
+                    return Err(syn::Error::new(
+                        key.span(),
+                        "expected `path`, `consumes`, or `produces`",
+                    ));
+                }
+            }
+            if input.is_empty() {
+                break;
+            }
+            input.parse::<syn::Token![,]>()?;
         }
-        input.parse::<syn::Token![=]>()?;
-        let path: LitStr = input.parse()?;
-        Ok(Self { path: path.value() })
+        Ok(args)
     }
 }
+
+const APPLICATION_JSON: &str = "application/json";
+const TEXT_PLAIN: &str = "text/plain";
 
 fn expand_rest_client(args: RestClientArgs, trait_item: &mut ItemTrait) -> TokenStream2 {
     trait_item
@@ -94,7 +127,11 @@ fn expand_rest_client(args: RestClientArgs, trait_item: &mut ItemTrait) -> Token
     let trait_ident = trait_item.ident.clone();
     let client_ident = format_ident!("{trait_ident}Client");
     let vis = trait_item.vis.clone();
-    let base_path = args.path;
+    let trait_config = ResourceConfig {
+        path: args.path,
+        consumes: args.consumes,
+        produces: args.produces,
+    };
     let catnap = catnap_crate_path();
 
     let mut errors = Vec::new();
@@ -102,7 +139,7 @@ fn expand_rest_client(args: RestClientArgs, trait_item: &mut ItemTrait) -> Token
         .items
         .iter_mut()
         .filter_map(|item| match item {
-            TraitItem::Fn(method) => match expand_method(&catnap, &base_path, method) {
+            TraitItem::Fn(method) => match expand_method(&catnap, &trait_config, method) {
                 Ok(method) => Some(method),
                 Err(error) => {
                     errors.push(error.to_compile_error());
@@ -161,7 +198,7 @@ fn catnap_crate_path() -> TokenStream2 {
 
 fn expand_method(
     catnap: &TokenStream2,
-    base_path: &str,
+    trait_config: &ResourceConfig,
     method: &mut TraitItemFn,
 ) -> syn::Result<TokenStream2> {
     let (verb, method_path) = take_http_attr(&mut method.attrs)?.ok_or_else(|| {
@@ -170,7 +207,11 @@ fn expand_method(
             "REST client methods must have an HTTP method attribute",
         )
     })?;
-    let full_path = join_paths(base_path, &method_path);
+    let consumes = take_media_type_attr(&mut method.attrs, "consumes")?
+        .unwrap_or_else(|| trait_config.consumes.clone());
+    let produces = take_media_type_attr(&mut method.attrs, "produces")?
+        .unwrap_or_else(|| trait_config.produces.clone());
+    let full_path = join_paths(&trait_config.path, &method_path);
 
     let mut path_replacements = Vec::new();
     let mut query_params = Vec::new();
@@ -214,8 +255,8 @@ fn expand_method(
 
     let sig = method.sig.clone();
     let output = &sig.output;
-    let body = body_arg.map(|arg| quote! { request = request.json(#arg); });
-    let sender = sender_for(output)?;
+    let body = body_for(catnap, body_arg, &consumes)?;
+    let sender = sender_for(catnap, output, &produces)?;
     let verb_ident = format_ident!("{}", verb);
 
     Ok(quote! {
@@ -223,6 +264,7 @@ fn expand_method(
             let mut path = #full_path.to_owned();
             #(#path_replacements)*
             let mut request = self.inner.request(#catnap::http::Method::#verb_ident, &path)?;
+            request = request.accept(#produces);
             #(#query_params)*
             #(#header_params)*
             #body
@@ -259,6 +301,47 @@ fn take_http_attr(attrs: &mut Vec<Attribute>) -> syn::Result<Option<(String, Str
         found = Some((verb.to_uppercase(), path));
     }
     Ok(found)
+}
+
+#[derive(Debug)]
+struct ResourceConfig {
+    path: String,
+    consumes: String,
+    produces: String,
+}
+
+fn take_media_type_attr(attrs: &mut Vec<Attribute>, name: &str) -> syn::Result<Option<String>> {
+    let Some((index, attr)) = attrs
+        .iter()
+        .enumerate()
+        .find(|(_, attr)| attr.path().is_ident(name))
+    else {
+        return Ok(None);
+    };
+
+    let value = validate_media_type(&attr.parse_args::<LitStr>()?)?;
+    attrs.remove(index);
+    Ok(Some(value))
+}
+
+fn validate_media_type(lit: &LitStr) -> syn::Result<String> {
+    let value = lit.value();
+    let (kind, subtype) = value.split_once('/').ok_or_else(|| {
+        syn::Error::new_spanned(lit, "media types must use `type/subtype` syntax")
+    })?;
+
+    if kind.is_empty()
+        || subtype.is_empty()
+        || value.chars().any(char::is_whitespace)
+        || kind.contains(';')
+    {
+        return Err(syn::Error::new_spanned(
+            lit,
+            "media types must be non-empty `type/subtype` values without whitespace",
+        ));
+    }
+
+    Ok(value)
 }
 
 fn validate_path_params(
@@ -319,7 +402,36 @@ fn pat_ident(pat: &Pat) -> Option<Ident> {
     }
 }
 
-fn sender_for(output: &ReturnType) -> syn::Result<TokenStream2> {
+fn body_for(
+    catnap: &TokenStream2,
+    body_arg: Option<Ident>,
+    consumes: &str,
+) -> syn::Result<TokenStream2> {
+    let Some(arg) = body_arg else {
+        return Ok(quote! {});
+    };
+
+    match consumes {
+        APPLICATION_JSON => Ok(quote! {
+            request = request.content_type(#consumes).json(#arg);
+        }),
+        TEXT_PLAIN => Ok(quote! {
+            request = request.content_type(#consumes).text(#arg);
+        }),
+        _ => Ok(quote! {
+            return Err(#catnap::Error::UnsupportedMediaType {
+                operation: "request body serialization",
+                media_type: #consumes,
+            });
+        }),
+    }
+}
+
+fn sender_for(
+    catnap: &TokenStream2,
+    output: &ReturnType,
+    produces: &str,
+) -> syn::Result<TokenStream2> {
     let ReturnType::Type(_, ty) = output else {
         return Err(syn::Error::new_spanned(
             output,
@@ -336,8 +448,17 @@ fn sender_for(output: &ReturnType) -> syn::Result<TokenStream2> {
         Ok(quote! { request.send().await })
     } else if is_unit(inner) {
         Ok(quote! { request.send_empty().await })
-    } else {
+    } else if is_string(inner) && produces == TEXT_PLAIN {
+        Ok(quote! { request.send_text().await })
+    } else if produces == APPLICATION_JSON {
         Ok(quote! { request.send_json::<#inner>().await })
+    } else {
+        Ok(quote! {
+            Err(#catnap::Error::UnsupportedMediaType {
+                operation: "response deserialization",
+                media_type: #produces,
+            })
+        })
     }
 }
 
@@ -364,6 +485,10 @@ fn is_response(ty: &Type) -> bool {
 
 fn is_unit(ty: &Type) -> bool {
     matches!(ty, Type::Tuple(tuple) if tuple.elems.is_empty())
+}
+
+fn is_string(ty: &Type) -> bool {
+    matches!(ty, Type::Path(type_path) if type_path.path.segments.last().is_some_and(|segment| segment.ident == "String"))
 }
 
 fn join_paths(base: &str, method: &str) -> String {

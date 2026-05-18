@@ -13,7 +13,7 @@ struct NewUser {
     name: String,
 }
 
-#[rest_client(path = "/users")]
+#[rest_client(path = "/users", produces = "application/json")]
 trait Users {
     #[get("")]
     async fn list(&self, #[query("page")] page: u32) -> Result<Vec<User>>;
@@ -27,6 +27,14 @@ trait Users {
         #[header("Authorization")] auth: &str,
         user: &NewUser,
     ) -> Result<Response>;
+
+    #[get("/{id}/name")]
+    #[catnap::produces("text/plain")]
+    async fn name(&self, #[path("id")] id: &str) -> Result<String>;
+
+    #[post("/{id}/name")]
+    #[catnap::consumes("text/plain")]
+    async fn rename(&self, #[path("id")] id: &str, name: &str) -> Result<()>;
 }
 
 #[test]
