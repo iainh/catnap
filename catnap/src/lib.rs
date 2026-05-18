@@ -958,6 +958,18 @@ mod tests {
         assert_eq!(__private::encode_path_segment("a/b c"), "a%2Fb%20c");
     }
 
+    #[test]
+    fn media_operations_have_stable_display_text() {
+        assert_eq!(
+            MediaOperation::RequestSerialization.to_string(),
+            "request body serialization"
+        );
+        assert_eq!(
+            MediaOperation::ResponseDeserialization.to_string(),
+            "response deserialization"
+        );
+    }
+
     #[cfg(feature = "basic-auth")]
     #[test]
     fn basic_auth_sets_authorization_header() {

@@ -187,6 +187,81 @@ fn main() {}
 "#,
             "duplicate `path` argument",
         ),
+        CompileCase::fail(
+            "missing_path_argument",
+            r#"
+use catnap::{get, rest_client, Result};
+
+#[rest_client(path = "/users/{id}")]
+trait Api {
+    #[get("")]
+    async fn get(&self) -> Result<()>;
+}
+
+fn main() {}
+"#,
+            "missing #[path(\"id\")] argument for path placeholder",
+        ),
+        CompileCase::fail(
+            "extra_path_argument",
+            r#"
+use catnap::{get, path, rest_client, Result};
+
+#[rest_client(path = "/users")]
+trait Api {
+    #[get("")]
+    async fn get(&self, #[path("id")] id: &str) -> Result<()>;
+}
+
+fn main() {}
+"#,
+            "#[path(\"id\")] does not match a path placeholder",
+        ),
+        CompileCase::fail(
+            "duplicate_path_placeholders",
+            r#"
+use catnap::{get, path, rest_client, Result};
+
+#[rest_client]
+trait Api {
+    #[get("/users/{id}/aliases/{id}")]
+    async fn get(&self, #[path("id")] id: &str) -> Result<()>;
+}
+
+fn main() {}
+"#,
+            "REST client path placeholders must be unique",
+        ),
+        CompileCase::fail(
+            "duplicate_body_arguments",
+            r#"
+use catnap::{post, rest_client, Result};
+
+#[rest_client]
+trait Api {
+    #[post("/items")]
+    async fn create(&self, first: &str, second: &str) -> Result<()>;
+}
+
+fn main() {}
+"#,
+            "REST client methods may have at most one unannotated body argument",
+        ),
+        CompileCase::fail(
+            "invalid_media_type",
+            r#"
+use catnap::{get, rest_client, Result};
+
+#[rest_client(produces = "application json")]
+trait Api {
+    #[get("/items")]
+    async fn list(&self) -> Result<()>;
+}
+
+fn main() {}
+"#,
+            "media types must use `type/subtype` syntax",
+        ),
         CompileCase::pass(
             "qualified_catnap_attributes",
             r#"

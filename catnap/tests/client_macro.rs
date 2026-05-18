@@ -7,7 +7,9 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use catnap::{QueryParamStyle, Response, RestClientBuilder, Result, rest_client};
+use catnap::{
+    Error, MediaOperation, QueryParamStyle, Response, RestClientBuilder, Result, rest_client,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
@@ -59,6 +61,16 @@ trait Users {
 trait Search {
     #[get("/search")]
     async fn search(&self, #[query("tag")] tags: Vec<&str>) -> Result<()>;
+
+    #[get("/search")]
+    async fn search_slice(&self, #[query("tag")] tags: &[&str]) -> Result<()>;
+}
+
+#[rest_client]
+trait UnsupportedMedia {
+    #[get("/download")]
+    #[catnap::produces("application/octet-stream")]
+    async fn download(&self) -> Result<Vec<u8>>;
 }
 
 #[test]
@@ -88,6 +100,39 @@ async fn generated_client_uses_query_param_style_for_collections() -> Result<()>
         request.line,
         "GET /search?tag%5B%5D=rust&tag%5B%5D=http HTTP/1.1"
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn generated_client_uses_comma_separated_query_style_for_slices() -> Result<()> {
+    let server = TestServer::spawn("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n");
+
+    let client = SearchClient::builder()
+        .base_url(server.base_url())?
+        .query_param_style(QueryParamStyle::CommaSeparated)
+        .build()?;
+
+    client.search_slice(&["rust", "http"]).await?;
+
+    let request = server.request();
+    assert_eq!(request.line, "GET /search?tag=rust%2Chttp HTTP/1.1");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn generated_client_defaults_to_multi_pair_query_style() -> Result<()> {
+    let server = TestServer::spawn("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n");
+
+    let client = SearchClient::builder()
+        .base_url(server.base_url())?
+        .build()?;
+
+    client.search(vec!["rust", "http"]).await?;
+
+    let request = server.request();
+    assert_eq!(request.line, "GET /search?tag=rust&tag=http HTTP/1.1");
 
     Ok(())
 }
@@ -156,6 +201,53 @@ async fn generated_post_sends_headers_and_json_body() -> Result<()> {
 
     let body: serde_json::Value = serde_json::from_str(&request.body).expect("valid JSON body");
     assert_eq!(body, serde_json::json!({ "name": "Ada" }));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn typed_responses_return_http_errors_with_bodies() -> Result<()> {
+    let server = TestServer::spawn(
+        "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: 12\r\n\r\nmissing user",
+    );
+
+    let client = UsersClient::builder()
+        .base_url(server.base_url())?
+        .build()?;
+
+    let error = client.get("missing").await.expect_err("404 should fail");
+
+    let request = server.request();
+    assert_eq!(request.line, "GET /users/missing HTTP/1.1");
+    assert!(matches!(
+        error,
+        Error::Http {
+            status: catnap::http::StatusCode::NOT_FOUND,
+            ref body,
+        } if body == "missing user"
+    ));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn unsupported_response_media_type_fails_before_sending() -> Result<()> {
+    let client = UnsupportedMediaClient::builder()
+        .base_url("http://127.0.0.1:9")?
+        .build()?;
+
+    let error = client
+        .download()
+        .await
+        .expect_err("unsupported response media type should fail");
+
+    assert!(matches!(
+        error,
+        Error::UnsupportedMediaType {
+            operation: MediaOperation::ResponseDeserialization,
+            media_type: "application/octet-stream",
+        }
+    ));
 
     Ok(())
 }
