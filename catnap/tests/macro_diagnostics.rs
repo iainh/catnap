@@ -9,7 +9,7 @@ fn macro_diagnostics_are_compile_time_errors() {
         CompileCase::fail(
             "malformed_parameter_attribute",
             r#"
-use catnap::{get, rest_client, Result};
+use catnap::{rest_client, Result};
 
 #[rest_client]
 trait Api {
@@ -24,7 +24,7 @@ fn main() {}
         CompileCase::fail(
             "multiple_parameter_bindings",
             r#"
-use catnap::{get, rest_client, Result};
+use catnap::{rest_client, Result};
 
 #[rest_client]
 trait Api {
@@ -34,12 +34,28 @@ trait Api {
 
 fn main() {}
 "#,
-            "may have only one of #[path()], #[query()], or #[header]",
+            "may have only one of #[path], #[query], #[query_map], or #[header]",
+        ),
+        CompileCase::fail(
+            "query_map_rejects_arguments",
+            r#"
+use catnap::{rest_client, Result};
+use std::collections::BTreeMap;
+
+#[rest_client]
+trait Api {
+    #[get("/items")]
+    async fn list(&self, #[query_map("prefix")] parameters: &BTreeMap<String, Vec<String>>) -> Result<()>;
+}
+
+fn main() {}
+"#,
+            "#[query_map] does not accept arguments",
         ),
         CompileCase::fail(
             "non_async_method",
             r#"
-use catnap::{get, rest_client, Result};
+use catnap::{rest_client, Result};
 
 #[rest_client]
 trait Api {
@@ -54,7 +70,7 @@ fn main() {}
         CompileCase::fail(
             "missing_receiver",
             r#"
-use catnap::{get, rest_client, Result};
+use catnap::{rest_client, Result};
 
 #[rest_client]
 trait Api {
@@ -69,7 +85,7 @@ fn main() {}
         CompileCase::fail(
             "get_body_argument",
             r#"
-use catnap::{get, rest_client, Result};
+use catnap::{rest_client, Result};
 
 #[rest_client]
 trait Api {
@@ -84,7 +100,7 @@ fn main() {}
         CompileCase::fail(
             "unclosed_path_placeholder",
             r#"
-use catnap::{get, rest_client, Result};
+use catnap::{rest_client, Result};
 
 #[rest_client]
 trait Api {
@@ -99,7 +115,7 @@ fn main() {}
         CompileCase::fail(
             "duplicate_http_methods",
             r#"
-use catnap::{get, post, rest_client, Result};
+use catnap::{rest_client, Result};
 
 #[rest_client]
 trait Api {
@@ -115,7 +131,7 @@ fn main() {}
         CompileCase::fail(
             "std_result_return",
             r#"
-use catnap::{get, rest_client};
+use catnap::rest_client;
 
 #[rest_client]
 trait Api {
@@ -130,7 +146,7 @@ fn main() {}
         CompileCase::fail(
             "tuple_parameter_pattern",
             r#"
-use catnap::{get, rest_client, Result};
+use catnap::{rest_client, Result};
 
 #[rest_client]
 trait Api {
@@ -145,7 +161,7 @@ fn main() {}
         CompileCase::fail(
             "empty_path_parameter_name",
             r#"
-use catnap::{get, rest_client, Result};
+use catnap::{rest_client, Result};
 
 #[rest_client]
 trait Api {
@@ -160,7 +176,7 @@ fn main() {}
         CompileCase::fail(
             "invalid_header_name",
             r#"
-use catnap::{get, header, rest_client, Result};
+use catnap::{rest_client, Result};
 
 #[rest_client]
 trait Api {
@@ -175,7 +191,7 @@ fn main() {}
         CompileCase::fail(
             "duplicate_resource_argument",
             r#"
-use catnap::{get, rest_client, Result};
+use catnap::{rest_client, Result};
 
 #[rest_client(path = "/v1", path = "/v2")]
 trait Api {
@@ -190,7 +206,7 @@ fn main() {}
         CompileCase::fail(
             "missing_path_argument",
             r#"
-use catnap::{get, rest_client, Result};
+use catnap::{rest_client, Result};
 
 #[rest_client(path = "/users/{id}")]
 trait Api {
@@ -205,7 +221,7 @@ fn main() {}
         CompileCase::fail(
             "extra_path_argument",
             r#"
-use catnap::{get, rest_client, Result};
+use catnap::{rest_client, Result};
 
 #[rest_client(path = "/users")]
 trait Api {
@@ -220,7 +236,7 @@ fn main() {}
         CompileCase::fail(
             "duplicate_path_placeholders",
             r#"
-use catnap::{get, rest_client, Result};
+use catnap::{rest_client, Result};
 
 #[rest_client]
 trait Api {
@@ -235,7 +251,7 @@ fn main() {}
         CompileCase::fail(
             "duplicate_body_arguments",
             r#"
-use catnap::{post, rest_client, Result};
+use catnap::{rest_client, Result};
 
 #[rest_client]
 trait Api {
@@ -250,7 +266,7 @@ fn main() {}
         CompileCase::fail(
             "invalid_media_type",
             r#"
-use catnap::{get, rest_client, Result};
+use catnap::{rest_client, Result};
 
 #[rest_client(produces = "application json")]
 trait Api {
@@ -263,18 +279,18 @@ fn main() {}
             "media types must use `type/subtype` syntax",
         ),
         CompileCase::pass(
-            "qualified_catnap_attributes",
+            "bare_helper_attributes",
             r#"
 use catnap::{rest_client, Result};
 
 #[rest_client(path = "/items")]
 trait Api {
-    #[catnap::get("/{id}")]
-    #[catnap::produces("text/plain")]
+    #[get("/{id}")]
+    #[produces("text/plain")]
     async fn get(&self, #[path("id")] id: &str) -> Result<String>;
 
-    #[catnap::post("/{id}")]
-    #[catnap::consumes("text/plain")]
+    #[post("/{id}")]
+    #[consumes("text/plain")]
     async fn rename(&self, #[path("id")] id: &str, name: &str) -> Result<()>;
 }
 
@@ -284,12 +300,18 @@ fn main() {}
         CompileCase::pass(
             "inferred_path_and_query_names",
             r#"
-use catnap::{get, rest_client, Result};
+use catnap::{rest_client, Result};
+use std::collections::BTreeMap;
 
 #[rest_client(path = "/users/{id}")]
 trait Api {
     #[get("/posts")]
-    async fn list(&self, #[path()] id: &str, #[query()] page: u32) -> Result<()>;
+    async fn list(
+        &self,
+        #[path] id: &str,
+        #[query] page: u32,
+        #[query_map] parameters: &BTreeMap<String, Vec<String>>,
+    ) -> Result<()>;
 }
 
 fn main() {}

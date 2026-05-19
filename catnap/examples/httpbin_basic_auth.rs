@@ -14,8 +14,8 @@ trait HttpBin {
     #[get("/basic-auth/{user}/{password}")]
     async fn check_credentials(
         &self,
-        #[path()] user: &str,
-        #[path()] password: &str,
+        #[path] user: &str,
+        #[path] password: &str,
     ) -> Result<BasicAuthResponse>;
 }
 

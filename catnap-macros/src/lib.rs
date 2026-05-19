@@ -2,8 +2,8 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::{
-    Attribute, FnArg, Ident, ItemTrait, LitStr, Pat, ReturnType, TraitItem, TraitItemFn, Type,
-    parse_macro_input, spanned::Spanned,
+    Attribute, FnArg, Ident, ItemTrait, LitStr, Meta, Pat, ReturnType, TraitItem, TraitItemFn,
+    Type, parse_macro_input, spanned::Spanned,
 };
 
 /// Generates a reqwest-backed client implementation for an annotated trait.
@@ -17,78 +17,6 @@ pub fn rest_client(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut trait_item = parse_macro_input!(item as ItemTrait);
     let expanded = expand_rest_client(args, &mut trait_item);
     TokenStream::from(expanded)
-}
-
-/// Marks a trait method as an HTTP `GET` request.
-#[proc_macro_attribute]
-pub fn get(_: TokenStream, item: TokenStream) -> TokenStream {
-    item
-}
-
-/// Marks a trait method as an HTTP `POST` request.
-#[proc_macro_attribute]
-pub fn post(_: TokenStream, item: TokenStream) -> TokenStream {
-    item
-}
-
-/// Marks a trait method as an HTTP `PUT` request.
-#[proc_macro_attribute]
-pub fn put(_: TokenStream, item: TokenStream) -> TokenStream {
-    item
-}
-
-/// Marks a trait method as an HTTP `PATCH` request.
-#[proc_macro_attribute]
-pub fn patch(_: TokenStream, item: TokenStream) -> TokenStream {
-    item
-}
-
-/// Marks a trait method as an HTTP `DELETE` request.
-#[proc_macro_attribute]
-pub fn delete(_: TokenStream, item: TokenStream) -> TokenStream {
-    item
-}
-
-/// Marks a trait method as an HTTP `OPTIONS` request.
-#[proc_macro_attribute]
-pub fn options(_: TokenStream, item: TokenStream) -> TokenStream {
-    item
-}
-
-/// Marks a trait method as an HTTP `HEAD` request.
-#[proc_macro_attribute]
-pub fn head(_: TokenStream, item: TokenStream) -> TokenStream {
-    item
-}
-
-/// Binds a method argument to a path placeholder.
-#[proc_macro_attribute]
-pub fn path(_: TokenStream, item: TokenStream) -> TokenStream {
-    item
-}
-
-/// Binds a method argument to a query parameter.
-#[proc_macro_attribute]
-pub fn query(_: TokenStream, item: TokenStream) -> TokenStream {
-    item
-}
-
-/// Binds a method argument to a request header.
-#[proc_macro_attribute]
-pub fn header(_: TokenStream, item: TokenStream) -> TokenStream {
-    item
-}
-
-/// Sets the media type used to serialize the request body.
-#[proc_macro_attribute]
-pub fn consumes(_: TokenStream, item: TokenStream) -> TokenStream {
-    item
-}
-
-/// Sets the media type used to deserialize the response body.
-#[proc_macro_attribute]
-pub fn produces(_: TokenStream, item: TokenStream) -> TokenStream {
-    item
 }
 
 struct RestClientArgs {
@@ -356,6 +284,16 @@ fn expand_method(
             }
             [
                 ParameterAttr {
+                    kind: ParameterAttrKind::QueryMap,
+                    name: _,
+                },
+            ] => {
+                query_params.push(quote! {
+                    #request_var = #request_var.query_map(#arg_ident);
+                });
+            }
+            [
+                ParameterAttr {
                     kind: ParameterAttrKind::Header,
                     name,
                 },
@@ -367,7 +305,7 @@ fn expand_method(
             _ => {
                 return Err(syn::Error::new_spanned(
                     pat_type,
-                    "REST client method parameters may have only one of #[path()], #[query()], or #[header]",
+                    "REST client method parameters may have only one of #[path], #[query], #[query_map], or #[header]",
                 ));
             }
         }
@@ -523,6 +461,7 @@ struct ParameterAttr {
 enum ParameterAttrKind {
     PathParam,
     QueryParam,
+    QueryMap,
     Header,
 }
 
@@ -541,6 +480,10 @@ fn take_parameter_attrs(
             ParameterAttrKind::PathParam | ParameterAttrKind::QueryParam => {
                 parse_optional_string_arg(attr, kind.name())?
                     .unwrap_or_else(|| inferred_name.to_string())
+            }
+            ParameterAttrKind::QueryMap => {
+                reject_attr_args(attr, kind.name())?;
+                inferred_name.to_string()
             }
             ParameterAttrKind::Header => parse_required_string_arg(attr, kind.name())?,
         };
@@ -564,6 +507,7 @@ impl ParameterAttrKind {
         match self {
             Self::PathParam => "path",
             Self::QueryParam => "query",
+            Self::QueryMap => "query_map",
             Self::Header => "header",
         }
     }
@@ -574,6 +518,8 @@ fn parameter_attr_kind(attr: &Attribute) -> Option<ParameterAttrKind> {
         Some(ParameterAttrKind::PathParam)
     } else if is_catnap_attr(attr, "query") {
         Some(ParameterAttrKind::QueryParam)
+    } else if is_catnap_attr(attr, "query_map") {
+        Some(ParameterAttrKind::QueryMap)
     } else if is_catnap_attr(attr, "header") {
         Some(ParameterAttrKind::Header)
     } else {
@@ -605,6 +551,10 @@ fn parse_optional_string_arg(
     attr: &Attribute,
     description: &'static str,
 ) -> syn::Result<Option<String>> {
+    if matches!(attr.meta, Meta::Path(_)) {
+        return Ok(None);
+    }
+
     attr.parse_args_with(|input: syn::parse::ParseStream<'_>| {
         if input.is_empty() {
             return Ok(None);
@@ -619,6 +569,13 @@ fn parse_optional_string_arg(
 }
 
 fn parse_required_string_arg(attr: &Attribute, name: &str) -> syn::Result<String> {
+    if matches!(attr.meta, Meta::Path(_)) {
+        return Err(syn::Error::new_spanned(
+            attr,
+            format!("#[{name}] requires a string literal argument"),
+        ));
+    }
+
     attr.parse_args_with(|input: syn::parse::ParseStream<'_>| {
         if input.is_empty() {
             return Err(input.error(format!("#[{name}] requires a string literal argument")));
@@ -629,6 +586,20 @@ fn parse_required_string_arg(attr: &Attribute, name: &str) -> syn::Result<String
             return Err(input.error(format!("#[{name}] accepts exactly one string literal")));
         }
         Ok(value.value())
+    })
+}
+
+fn reject_attr_args(attr: &Attribute, name: &str) -> syn::Result<()> {
+    if matches!(attr.meta, Meta::Path(_)) {
+        return Ok(());
+    }
+
+    attr.parse_args_with(|input: syn::parse::ParseStream<'_>| {
+        if input.is_empty() {
+            Ok(())
+        } else {
+            Err(input.error(format!("#[{name}] does not accept arguments")))
+        }
     })
 }
 

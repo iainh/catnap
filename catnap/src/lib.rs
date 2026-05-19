@@ -22,7 +22,7 @@
 //! #[rest_client(path = "/users")]
 //! trait Users {
 //!     #[get("/{id}")]
-//!     async fn get_user(&self, #[path()] id: &str) -> Result<User>;
+//!     async fn get_user(&self, #[path] id: &str) -> Result<User>;
 //! }
 //!
 //! # async fn example() -> Result<()> {
@@ -40,7 +40,7 @@
 //! default media type when the default `json` feature is enabled.
 //!
 //! ```
-//! use catnap::{post, rest_client, Result};
+//! use catnap::{rest_client, Result};
 //! use serde::{Deserialize, Serialize};
 //!
 //! #[derive(Serialize)]
@@ -63,14 +63,14 @@
 //!
 //! # Paths, query parameters, and headers
 //!
-//! Use [`path`], [`query`], and [`header`] on method arguments to
-//! bind values to the generated request. Bare `#[path()]` and
-//! `#[query()]` infer the HTTP parameter name from the Rust argument name;
+//! Use `#[path]`, `#[query]`, and `#[header("Name")]` on method arguments to
+//! bind values to the generated request. Bare `#[path]` and
+//! `#[query]` infer the HTTP parameter name from the Rust argument name;
 //! use `#[path("name")]` or `#[query("name")]` when the remote API
 //! name differs.
 //!
 //! ```
-//! use catnap::{get, header, path, query, rest_client, Result};
+//! use catnap::{rest_client, Result};
 //! use serde::Deserialize;
 //!
 //! #[derive(Deserialize)]
@@ -83,9 +83,9 @@
 //!     #[get("/users/{id}")]
 //!     async fn get_user(
 //!         &self,
-//!         #[path()] tenant: &str,
-//!         #[path()] id: &str,
-//!         #[query()] include: &str,
+//!         #[path] tenant: &str,
+//!         #[path] id: &str,
+//!         #[query] include: &str,
 //!         #[header("X-Request-Id")] request_id: &str,
 //!     ) -> Result<User>;
 //! }
@@ -98,7 +98,7 @@
 //! the `xml` feature.
 //!
 //! ```
-//! use catnap::{get, produces, rest_client, Result};
+//! use catnap::{rest_client, Result};
 //!
 //! #[rest_client]
 //! trait Health {
@@ -123,10 +123,7 @@
 //! responses. Sensitive headers such as `Authorization`, `Proxy-Authorization`,
 //! `Cookie`, and `Set-Cookie` are redacted.
 
-pub use catnap_macros::{
-    consumes, delete, get, head, header, options, patch, path, post, produces, put, query,
-    rest_client,
-};
+pub use catnap_macros::rest_client;
 pub use http;
 
 /// Common imports for defining generated REST clients.
@@ -136,9 +133,8 @@ pub use http;
 /// application code that defines several Catnap traits in one module.
 pub mod prelude {
     pub use crate::{
-        Error, MediaOperation, QueryParamStyle, Response, ResponseExceptionContext,
-        ResponseExceptionMapper, RestClientBuilder, Result, consumes, delete, get, head, header,
-        options, patch, path, post, produces, put, query, rest_client,
+        Error, MediaOperation, QueryMap, QueryParamStyle, Response, ResponseExceptionContext,
+        ResponseExceptionMapper, RestClientBuilder, Result, rest_client,
     };
 }
 
@@ -148,8 +144,10 @@ use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use reqwest::redirect::Policy;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use std::collections::{BTreeMap, HashMap};
 use std::error::Error as StdError;
 use std::fmt::{self, Display};
+use std::hash::Hash;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
@@ -367,6 +365,52 @@ pub enum QueryParamStyle {
     CommaSeparated,
     /// `key[]=value1&key[]=value2`
     ArrayPairs,
+}
+
+/// Dynamic query parameters flattened into a request query string.
+///
+/// This is useful for APIs where callers provide arbitrary query names at
+/// runtime, similar to `@RestQuery Map<String, List<String>>` in RESTEasy
+/// Reactive.
+pub trait QueryMap {
+    /// Appends the query map to the request using the configured repeated query
+    /// parameter style.
+    fn append_query_map(&self, request: RequestBuilder) -> RequestBuilder;
+}
+
+impl<K, V> QueryMap for BTreeMap<K, Vec<V>>
+where
+    K: Display,
+    V: Display,
+{
+    fn append_query_map(&self, mut request: RequestBuilder) -> RequestBuilder {
+        for (name, values) in self {
+            request = request.query_params(&name.to_string(), values);
+        }
+        request
+    }
+}
+
+impl<K, V> QueryMap for HashMap<K, Vec<V>>
+where
+    K: Display + Eq + Hash,
+    V: Display,
+{
+    fn append_query_map(&self, mut request: RequestBuilder) -> RequestBuilder {
+        for (name, values) in self {
+            request = request.query_params(&name.to_string(), values);
+        }
+        request
+    }
+}
+
+impl<T> QueryMap for &T
+where
+    T: QueryMap + ?Sized,
+{
+    fn append_query_map(&self, request: RequestBuilder) -> RequestBuilder {
+        (*self).append_query_map(request)
+    }
 }
 
 type ResponseExceptionMapperFn =
@@ -781,6 +825,11 @@ impl RequestBuilder {
             }
         }
         self
+    }
+
+    /// Adds dynamic query parameters from a map-like value.
+    pub fn query_map(self, values: impl QueryMap) -> Self {
+        values.append_query_map(self)
     }
 
     /// Serializes a JSON request body.

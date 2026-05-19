@@ -46,27 +46,23 @@ trait Users {
     ) -> Result<Response>;
 
     #[get("/{id}/name")]
-    #[catnap::produces("text/plain")]
+    #[produces("text/plain")]
     async fn name(&self, #[path("id")] id: &str) -> Result<String>;
 
     #[post("/{id}/name")]
-    #[catnap::consumes("text/plain")]
+    #[consumes("text/plain")]
     async fn rename(&self, #[path("id")] id: &str, name: &str) -> Result<()>;
 
     #[post("/xml")]
-    #[catnap::consumes("application/xml")]
-    #[catnap::produces("application/xml")]
+    #[consumes("application/xml")]
+    #[produces("application/xml")]
     async fn create_xml(&self, user: &XmlUser) -> Result<XmlUser>;
 
     #[get("/{id}/inferred")]
-    async fn inferred(&self, #[path()] id: &str, #[query()] include: &str) -> Result<Response>;
+    async fn inferred(&self, #[path] id: &str, #[query] include: &str) -> Result<Response>;
 
     #[get("/{path}/shadow")]
-    async fn shadowed_names(
-        &self,
-        #[path()] path: &str,
-        #[query()] request: &str,
-    ) -> Result<Response>;
+    async fn shadowed_names(&self, #[path] path: &str, #[query] request: &str) -> Result<Response>;
 }
 
 #[rest_client]
@@ -76,12 +72,18 @@ trait Search {
 
     #[get("/search")]
     async fn search_slice(&self, #[query("tag")] tags: &[&str]) -> Result<()>;
+
+    #[get("/search")]
+    async fn search_map(
+        &self,
+        #[query_map] parameters: &BTreeMap<String, Vec<String>>,
+    ) -> Result<()>;
 }
 
 #[rest_client]
 trait UnsupportedMedia {
     #[get("/download")]
-    #[catnap::produces("application/octet-stream")]
+    #[produces("application/octet-stream")]
     async fn download(&self) -> Result<Vec<u8>>;
 }
 
@@ -145,6 +147,48 @@ async fn generated_client_defaults_to_multi_pair_query_param_style() -> Result<(
 
     let request = server.request();
     assert_eq!(request.line, "GET /search?tag=rust&tag=http HTTP/1.1");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn generated_client_flattens_dynamic_query_maps() -> Result<()> {
+    let server = TestServer::spawn("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n");
+
+    let client = SearchClient::builder()
+        .base_url(server.base_url())?
+        .build()?;
+
+    let parameters = BTreeMap::from([
+        ("page".to_owned(), vec!["1".to_owned()]),
+        ("tag".to_owned(), vec!["rust".to_owned(), "http".to_owned()]),
+    ]);
+    client.search_map(&parameters).await?;
+
+    let request = server.request();
+    assert_eq!(
+        request.line,
+        "GET /search?page=1&tag=rust&tag=http HTTP/1.1"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn generated_client_applies_query_param_style_to_dynamic_query_maps() -> Result<()> {
+    let server = TestServer::spawn("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n");
+
+    let client = SearchClient::builder()
+        .base_url(server.base_url())?
+        .query_param_style(QueryParamStyle::CommaSeparated)
+        .build()?;
+
+    let parameters =
+        BTreeMap::from([("tag".to_owned(), vec!["rust".to_owned(), "http".to_owned()])]);
+    client.search_map(&parameters).await?;
+
+    let request = server.request();
+    assert_eq!(request.line, "GET /search?tag=rust%2Chttp HTTP/1.1");
 
     Ok(())
 }
