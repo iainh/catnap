@@ -1,6 +1,4 @@
-#[allow(unused_imports)]
-use catnap::get;
-use catnap::{Result, rest_client};
+use catnap::prelude::*;
 use serde::Deserialize;
 
 mod support;
@@ -16,8 +14,8 @@ trait HttpBin {
     #[get("/basic-auth/{user}/{password}")]
     async fn check_credentials(
         &self,
-        #[path("user")] user: &str,
-        #[path("password")] password: &str,
+        #[path()] user: &str,
+        #[path()] password: &str,
     ) -> Result<BasicAuthResponse>;
 }
 

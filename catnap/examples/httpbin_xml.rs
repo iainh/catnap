@@ -1,6 +1,4 @@
-use catnap::{Result, rest_client};
-#[allow(unused_imports)]
-use catnap::{get, produces};
+use catnap::prelude::*;
 use serde::Deserialize;
 
 mod support;

@@ -1,13 +1,11 @@
-#[allow(unused_imports)]
-use catnap::get;
-use catnap::{Response, Result, rest_client};
+use catnap::prelude::*;
 
 mod support;
 
 #[rest_client]
 trait HttpBin {
     #[get("/status/{code}")]
-    async fn status(&self, #[path("code")] code: u16) -> Result<Response>;
+    async fn status(&self, #[path()] code: u16) -> Result<Response>;
 }
 
 #[tokio::main]
