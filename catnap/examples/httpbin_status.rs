@@ -1,4 +1,4 @@
-use catnap::prelude::*;
+use catnap::{Response, Result, rest_client};
 
 mod support;
 

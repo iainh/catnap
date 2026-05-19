@@ -24,7 +24,7 @@ Define a trait for the remote resource and annotate each method with its HTTP
 shape:
 
 ```rust
-use catnap::prelude::*;
+use catnap::{rest_client, Result};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]

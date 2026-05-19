@@ -1,4 +1,4 @@
-use catnap::prelude::*;
+use catnap::{Result, rest_client};
 use serde::Deserialize;
 
 mod support;
