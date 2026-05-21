@@ -45,6 +45,10 @@ name = "httpbin_status"
 path = "examples/httpbin_status.rs"
 
 [[example]]
+name = "httpbin_custom_error"
+path = "examples/httpbin_custom_error.rs"
+
+[[example]]
 name = "httpbin_basic_auth"
 path = "examples/httpbin_basic_auth.rs"
 required-features = ["basic-auth", "json"]
