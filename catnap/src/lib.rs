@@ -129,10 +129,12 @@ pub use http;
 use http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, COOKIE, PROXY_AUTHORIZATION, SET_COOKIE};
 use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
+use reqwest::Proxy;
 use reqwest::redirect::Policy;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::collections::{BTreeMap, HashMap};
+use std::env;
 use std::error::Error as StdError;
 use std::fmt::{self, Display};
 use std::hash::Hash;
@@ -189,6 +191,15 @@ pub enum Error {
         name: String,
         /// The invalid header value error.
         source: http::header::InvalidHeaderValue,
+    },
+    /// A config value could not be parsed.
+    InvalidConfigValue {
+        /// Config key that supplied the invalid value.
+        key: String,
+        /// Invalid config value.
+        value: String,
+        /// Human-readable parse failure.
+        message: String,
     },
     /// The selected request or response media type is not supported.
     UnsupportedMediaType {
@@ -262,6 +273,16 @@ impl Display for Error {
                     "invalid HTTP header value for `{name}`: {source}"
                 )
             }
+            Self::InvalidConfigValue {
+                key,
+                value,
+                message,
+            } => {
+                write!(
+                    formatter,
+                    "invalid config value `{value}` for `{key}`: {message}"
+                )
+            }
             Self::UnsupportedMediaType {
                 operation,
                 media_type,
@@ -304,6 +325,7 @@ impl StdError for Error {
             Self::MappedResponse(source) => Some(source.as_ref()),
             Self::MissingBaseUrl
             | Self::InvalidHeaderName(_)
+            | Self::InvalidConfigValue { .. }
             | Self::UnsupportedMediaType { .. }
             | Self::Http { .. } => None,
         }
@@ -353,6 +375,17 @@ pub enum QueryParamStyle {
     CommaSeparated,
     /// `key[]=value1&key[]=value2`
     ArrayPairs,
+}
+
+impl QueryParamStyle {
+    fn parse_config(value: &str) -> Option<Self> {
+        match value {
+            "MULTI_PAIRS" | "multi_pairs" | "multi-pairs" => Some(Self::MultiPairs),
+            "COMMA_SEPARATED" | "comma_separated" | "comma-separated" => Some(Self::CommaSeparated),
+            "ARRAY_PAIRS" | "array_pairs" | "array-pairs" => Some(Self::ArrayPairs),
+            _ => None,
+        }
+    }
 }
 
 /// Dynamic query parameters flattened into a request query string.
@@ -503,6 +536,26 @@ impl<T> RestClientBuilder<T> {
         }
     }
 
+    /// Sets the configuration key used by [`Self::load_env`].
+    ///
+    /// Generated clients default this to the trait name or to the explicit
+    /// `config_key` macro argument.
+    pub fn config_key(mut self, key: impl Into<String>) -> Self {
+        self.config.config_key = Some(key.into());
+        self
+    }
+
+    /// Applies environment configuration for the current config key.
+    ///
+    /// Catnap reads MicroProfile-style keys such as
+    /// `<key>/mp-rest/url` and shell-friendly keys such as
+    /// `CATNAP_<KEY>_URL`, where `<KEY>` is uppercased and non-alphanumeric
+    /// characters are converted to underscores.
+    pub fn load_env(mut self) -> Result<Self> {
+        self.config.load_env()?;
+        Ok(self)
+    }
+
     /// Sets the base URL used by all generated request paths.
     ///
     /// Request paths are joined against this URL. A trailing slash is added to
@@ -549,6 +602,12 @@ impl<T> RestClientBuilder<T> {
         self
     }
 
+    /// Sets an HTTP proxy URL used by the underlying `reqwest::Client`.
+    pub fn proxy(mut self, url: impl Into<String>) -> Self {
+        self.config.proxy = Some(url.into());
+        self
+    }
+
     /// Sets a total request timeout on the underlying `reqwest::Client`.
     ///
     /// This is an alias for [`Self::request_timeout`].
@@ -563,6 +622,12 @@ impl<T> RestClientBuilder<T> {
     /// body download.
     pub fn request_timeout(mut self, timeout: Duration) -> Self {
         self.config.timeout = Some(timeout);
+        self
+    }
+
+    /// Sets the timeout for reading response body chunks.
+    pub fn read_timeout(mut self, timeout: Duration) -> Self {
+        self.config.read_timeout = Some(timeout);
         self
     }
 
@@ -648,14 +713,20 @@ pub trait BuildFromConfig: Sized {
 /// Runtime configuration consumed by generated clients.
 #[derive(Debug, Clone)]
 pub struct RestClientConfig {
+    /// Configuration key used for environment-backed configuration.
+    pub config_key: Option<String>,
     /// Base URL used to resolve generated request paths.
     pub base_url: Option<Url>,
     /// Headers applied to every request.
     pub default_headers: HeaderMap,
     /// Whether the underlying client follows redirects.
     pub follow_redirects: bool,
+    /// Optional HTTP proxy URL.
+    pub proxy: Option<String>,
     /// Optional total request timeout.
     pub timeout: Option<Duration>,
+    /// Optional timeout for reading response body chunks.
+    pub read_timeout: Option<Duration>,
     /// Optional connection-establishment timeout.
     pub connect_timeout: Option<Duration>,
     /// Encoding style for repeated query parameters.
@@ -669,15 +740,182 @@ pub struct RestClientConfig {
 impl Default for RestClientConfig {
     fn default() -> Self {
         Self {
+            config_key: None,
             base_url: None,
             default_headers: HeaderMap::default(),
             follow_redirects: false,
+            proxy: None,
             timeout: None,
+            read_timeout: None,
             connect_timeout: None,
             query_param_style: QueryParamStyle::default(),
             response_exception_mappers: Vec::new(),
             default_response_exception_mapper: true,
         }
+    }
+}
+
+impl RestClientConfig {
+    /// Applies environment-backed configuration using this config's key.
+    pub fn load_env(&mut self) -> Result<()> {
+        let Some(config_key) = self.config_key.clone() else {
+            return Ok(());
+        };
+        self.load_env_for_key(&config_key)
+    }
+
+    /// Applies environment-backed configuration for the supplied key.
+    pub fn load_env_for_key(&mut self, config_key: &str) -> Result<()> {
+        let source = EnvConfigSource::new(config_key);
+
+        if let Some((key, value)) = source.get("uri").or_else(|| source.get("url")) {
+            self.base_url =
+                Some(
+                    Url::parse(&value).map_err(|source| Error::InvalidConfigValue {
+                        key,
+                        value,
+                        message: source.to_string(),
+                    })?,
+                );
+        }
+
+        if let Some((key, value)) = source.get("followRedirects") {
+            self.follow_redirects = parse_config_bool(&key, &value)?;
+        }
+
+        if let Some((_, value)) = source.get_any(&["proxyAddress", "proxy"]) {
+            self.proxy = Some(proxy_address_to_url(&value));
+        }
+
+        if let Some((key, value)) = source.get("connectTimeout") {
+            self.connect_timeout = Some(parse_config_duration_ms(&key, &value)?);
+        }
+
+        if let Some((key, value)) = source.get("readTimeout") {
+            self.read_timeout = Some(parse_config_duration_ms(&key, &value)?);
+        }
+
+        if let Some((key, value)) = source.get("queryParamStyle") {
+            self.query_param_style =
+                QueryParamStyle::parse_config(&value).ok_or_else(|| Error::InvalidConfigValue {
+                    key,
+                    value,
+                    message: "expected MULTI_PAIRS, COMMA_SEPARATED, or ARRAY_PAIRS".to_owned(),
+                })?;
+        }
+
+        if let Some((key, value)) = source.get_global_any(&[
+            "disable.default.mapper",
+            "disable.default.response.exception.mapper",
+        ]) {
+            self.default_response_exception_mapper = !parse_config_bool(&key, &value)?;
+        }
+
+        Ok(())
+    }
+}
+
+struct EnvConfigSource {
+    mp_prefix: String,
+    env_prefix: String,
+}
+
+impl EnvConfigSource {
+    fn new(config_key: &str) -> Self {
+        Self {
+            mp_prefix: format!("{config_key}/mp-rest/"),
+            env_prefix: format!("CATNAP_{}_", normalize_config_key(config_key)),
+        }
+    }
+
+    fn get(&self, property: &str) -> Option<(String, String)> {
+        let mp_key = format!("{}{property}", self.mp_prefix);
+        if let Ok(value) = env::var(&mp_key) {
+            return Some((mp_key, value));
+        }
+
+        let env_key = format!("{}{}", self.env_prefix, env_property_name(property));
+        env::var(&env_key).ok().map(|value| (env_key, value))
+    }
+
+    fn get_any(&self, properties: &[&str]) -> Option<(String, String)> {
+        properties.iter().find_map(|property| self.get(property))
+    }
+
+    fn get_global(&self, property: &str) -> Option<(String, String)> {
+        let mp_key = format!("microprofile.rest.client.{property}");
+        if let Ok(value) = env::var(&mp_key) {
+            return Some((mp_key, value));
+        }
+
+        let env_key = format!("CATNAP_{}", env_property_name(property));
+        env::var(&env_key).ok().map(|value| (env_key, value))
+    }
+
+    fn get_global_any(&self, properties: &[&str]) -> Option<(String, String)> {
+        properties
+            .iter()
+            .find_map(|property| self.get_global(property))
+    }
+}
+
+fn normalize_config_key(value: &str) -> String {
+    value
+        .chars()
+        .map(|char| {
+            if char.is_ascii_alphanumeric() {
+                char.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn env_property_name(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(|char| {
+            if char.is_ascii_uppercase() {
+                ['_', char].into_iter()
+            } else if char.is_ascii_alphanumeric() {
+                ['\0', char.to_ascii_uppercase()].into_iter()
+            } else {
+                ['\0', '_'].into_iter()
+            }
+        })
+        .filter(|char| *char != '\0')
+        .collect()
+}
+
+fn parse_config_bool(key: &str, value: &str) -> Result<bool> {
+    match value {
+        "true" | "TRUE" | "True" | "1" => Ok(true),
+        "false" | "FALSE" | "False" | "0" => Ok(false),
+        _ => Err(Error::InvalidConfigValue {
+            key: key.to_owned(),
+            value: value.to_owned(),
+            message: "expected true or false".to_owned(),
+        }),
+    }
+}
+
+fn parse_config_duration_ms(key: &str, value: &str) -> Result<Duration> {
+    let millis = value
+        .parse::<u64>()
+        .map_err(|source| Error::InvalidConfigValue {
+            key: key.to_owned(),
+            value: value.to_owned(),
+            message: source.to_string(),
+        })?;
+    Ok(Duration::from_millis(millis))
+}
+
+fn proxy_address_to_url(value: &str) -> String {
+    if value.contains("://") {
+        value.to_owned()
+    } else {
+        format!("http://{value}")
     }
 }
 
@@ -712,8 +950,21 @@ impl RestClient {
         if let Some(timeout) = config.timeout {
             client = client.timeout(timeout);
         }
+        if let Some(timeout) = config.read_timeout {
+            client = client.read_timeout(timeout);
+        }
         if let Some(timeout) = config.connect_timeout {
             client = client.connect_timeout(timeout);
+        }
+        if let Some(proxy) = config.proxy {
+            client =
+                client.proxy(
+                    Proxy::all(&proxy).map_err(|source| Error::InvalidConfigValue {
+                        key: "proxyAddress".to_owned(),
+                        value: proxy,
+                        message: source.to_string(),
+                    })?,
+                );
         }
 
         let mut response_exception_mappers = config.response_exception_mappers;
@@ -1243,10 +1494,25 @@ mod tests {
     fn builder_sets_split_timeouts() {
         let builder = RestClientBuilder::<RestClient>::new()
             .request_timeout(Duration::from_secs(10))
+            .read_timeout(Duration::from_secs(5))
             .connect_timeout(Duration::from_secs(2));
 
         assert_eq!(builder.config.timeout, Some(Duration::from_secs(10)));
+        assert_eq!(builder.config.read_timeout, Some(Duration::from_secs(5)));
         assert_eq!(builder.config.connect_timeout, Some(Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn builder_sets_config_key_and_proxy() {
+        let builder = RestClientBuilder::<RestClient>::new()
+            .config_key("users-api")
+            .proxy("http://127.0.0.1:8080");
+
+        assert_eq!(builder.config.config_key.as_deref(), Some("users-api"));
+        assert_eq!(
+            builder.config.proxy.as_deref(),
+            Some("http://127.0.0.1:8080")
+        );
     }
 
     #[test]
@@ -1254,6 +1520,61 @@ mod tests {
         let builder = RestClientBuilder::<RestClient>::new().timeout(Duration::from_secs(10));
 
         assert_eq!(builder.config.timeout, Some(Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn config_key_normalizes_to_environment_prefix() {
+        assert_eq!(normalize_config_key("users-api"), "USERS_API");
+        assert_eq!(env_property_name("followRedirects"), "FOLLOW_REDIRECTS");
+        assert_eq!(env_property_name("connectTimeout"), "CONNECT_TIMEOUT");
+    }
+
+    #[test]
+    fn config_parser_applies_shell_friendly_env_keys() {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+        let _guard = ENV_LOCK.lock().expect("env lock should not be poisoned");
+        unsafe {
+            env::set_var("CATNAP_USERS_API_URL", "https://api.example.com");
+            env::set_var("CATNAP_USERS_API_FOLLOW_REDIRECTS", "true");
+            env::set_var("CATNAP_USERS_API_PROXY", "proxy.example.com:8080");
+            env::set_var("CATNAP_USERS_API_CONNECT_TIMEOUT", "250");
+            env::set_var("CATNAP_USERS_API_READ_TIMEOUT", "1000");
+            env::set_var("CATNAP_USERS_API_QUERY_PARAM_STYLE", "COMMA_SEPARATED");
+            env::set_var("CATNAP_DISABLE_DEFAULT_MAPPER", "true");
+        }
+
+        let mut config = RestClientConfig {
+            config_key: Some("users-api".to_owned()),
+            ..RestClientConfig::default()
+        };
+        let result = config.load_env();
+
+        unsafe {
+            env::remove_var("CATNAP_USERS_API_URL");
+            env::remove_var("CATNAP_USERS_API_FOLLOW_REDIRECTS");
+            env::remove_var("CATNAP_USERS_API_PROXY");
+            env::remove_var("CATNAP_USERS_API_CONNECT_TIMEOUT");
+            env::remove_var("CATNAP_USERS_API_READ_TIMEOUT");
+            env::remove_var("CATNAP_USERS_API_QUERY_PARAM_STYLE");
+            env::remove_var("CATNAP_DISABLE_DEFAULT_MAPPER");
+        }
+
+        result.expect("env config should parse");
+        assert_eq!(
+            config.base_url.as_ref().map(Url::as_str),
+            Some("https://api.example.com/")
+        );
+        assert!(config.follow_redirects);
+        assert_eq!(
+            config.proxy.as_deref(),
+            Some("http://proxy.example.com:8080")
+        );
+        assert_eq!(config.connect_timeout, Some(Duration::from_millis(250)));
+        assert_eq!(config.read_timeout, Some(Duration::from_millis(1000)));
+        assert_eq!(config.timeout, None);
+        assert_eq!(config.query_param_style, QueryParamStyle::CommaSeparated);
+        assert!(!config.default_response_exception_mapper);
     }
 
     #[cfg(feature = "basic-auth")]

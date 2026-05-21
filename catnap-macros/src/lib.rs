@@ -9,8 +9,8 @@ use syn::{
 /// Generates a reqwest-backed client implementation for an annotated trait.
 ///
 /// The generated client is named `<TraitName>Client` and implements the source
-/// trait. The optional `path`, `consumes`, and `produces` arguments define
-/// resource-level defaults for methods.
+/// trait. The optional `path`, `consumes`, `produces`, and `config_key`
+/// arguments define resource-level defaults for methods.
 #[proc_macro_attribute]
 pub fn rest_client(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as RestClientArgs);
@@ -23,6 +23,7 @@ struct RestClientArgs {
     path: String,
     consumes: MediaType,
     produces: MediaType,
+    config_key: Option<String>,
 }
 
 impl syn::parse::Parse for RestClientArgs {
@@ -31,6 +32,7 @@ impl syn::parse::Parse for RestClientArgs {
             path: String::new(),
             consumes: MediaType::Json,
             produces: MediaType::Json,
+            config_key: None,
         };
         if input.is_empty() {
             return Ok(args);
@@ -39,6 +41,7 @@ impl syn::parse::Parse for RestClientArgs {
         let mut seen_path = false;
         let mut seen_consumes = false;
         let mut seen_produces = false;
+        let mut seen_config_key = false;
 
         while !input.is_empty() {
             let key: Ident = input.parse()?;
@@ -57,10 +60,14 @@ impl syn::parse::Parse for RestClientArgs {
                     reject_duplicate_arg(&mut seen_produces, &key)?;
                     args.produces = validate_media_type_lit(&value)?;
                 }
+                "config_key" => {
+                    reject_duplicate_arg(&mut seen_config_key, &key)?;
+                    args.config_key = Some(validate_config_key_lit(&value)?);
+                }
                 _ => {
                     return Err(syn::Error::new(
                         key.span(),
-                        "expected `path`, `consumes`, or `produces`",
+                        "expected `path`, `consumes`, `produces`, or `config_key`",
                     ));
                 }
             }
@@ -132,6 +139,7 @@ fn expand_rest_client(args: RestClientArgs, trait_item: &mut ItemTrait) -> Token
     let trait_ident = trait_item.ident.clone();
     let client_ident = format_ident!("{trait_ident}Client");
     let vis = trait_item.vis.clone();
+    let config_key = args.config_key.unwrap_or_else(|| trait_ident.to_string());
     let trait_config = ResourceConfig {
         path: args.path,
         consumes: args.consumes,
@@ -172,8 +180,14 @@ fn expand_rest_client(args: RestClientArgs, trait_item: &mut ItemTrait) -> Token
 
         #[automatically_derived]
         impl #client_ident {
+            pub const CONFIG_KEY: &'static str = #config_key;
+
             pub fn builder() -> #catnap::RestClientBuilder<Self> {
-                #catnap::RestClientBuilder::new()
+                #catnap::RestClientBuilder::new().config_key(Self::CONFIG_KEY)
+            }
+
+            pub fn from_env() -> #catnap::Result<Self> {
+                Self::builder().load_env()?.build()
             }
         }
 
@@ -660,6 +674,14 @@ fn validate_path_template(value: &str, span: proc_macro2::Span) -> syn::Result<(
 
 fn validate_media_type_lit(lit: &LitStr) -> syn::Result<MediaType> {
     validate_media_type(&lit.value(), lit.span())
+}
+
+fn validate_config_key_lit(lit: &LitStr) -> syn::Result<String> {
+    let value = lit.value();
+    if value.trim().is_empty() {
+        return Err(syn::Error::new(lit.span(), "config_key must not be empty"));
+    }
+    Ok(value)
 }
 
 fn validate_media_type(value: &str, span: proc_macro2::Span) -> syn::Result<MediaType> {

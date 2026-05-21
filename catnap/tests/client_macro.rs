@@ -5,7 +5,7 @@ use std::error::Error as StdError;
 use std::fmt;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
-use std::sync::mpsc;
+use std::sync::{Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
 
@@ -87,6 +87,14 @@ trait UnsupportedMedia {
     async fn download(&self) -> Result<Vec<u8>>;
 }
 
+#[rest_client(config_key = "users-api")]
+trait Configured {
+    #[get("/ping")]
+    async fn ping(&self) -> Result<Response>;
+}
+
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
 #[test]
 fn generated_client_can_be_built() -> Result<()> {
     let _client = UsersClient::builder()
@@ -95,6 +103,33 @@ fn generated_client_can_be_built() -> Result<()> {
         .build()?;
 
     let _builder: RestClientBuilder<UsersClient> = UsersClient::builder();
+    assert_eq!(UsersClient::CONFIG_KEY, "Users");
+    Ok(())
+}
+
+#[tokio::test]
+async fn generated_client_loads_config_key_from_env() -> Result<()> {
+    let server = TestServer::spawn("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n");
+    let client = {
+        let _guard = ENV_LOCK.lock().expect("env lock should not be poisoned");
+        unsafe {
+            std::env::set_var("CATNAP_USERS_API_URL", server.base_url());
+        }
+        let client = ConfiguredClient::from_env()?;
+        unsafe {
+            std::env::remove_var("CATNAP_USERS_API_URL");
+        }
+        client
+    };
+
+    assert_eq!(ConfiguredClient::CONFIG_KEY, "users-api");
+
+    let response = client.ping().await?;
+    assert_eq!(response.status(), catnap::http::StatusCode::NO_CONTENT);
+
+    let request = server.request();
+    assert_eq!(request.line, "GET /ping HTTP/1.1");
+
     Ok(())
 }
 

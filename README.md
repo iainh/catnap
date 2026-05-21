@@ -322,7 +322,9 @@ use std::time::Duration;
 let client = UsersClient::builder()
     .base_url("https://api.example.com")?
     .follow_redirects(true)
+    .proxy("http://proxy.example.com:8080")
     .connect_timeout(Duration::from_secs(2))
+    .read_timeout(Duration::from_secs(5))
     .request_timeout(Duration::from_secs(10))
     .header("User-Agent", "my-service")?
     .build()?;
@@ -341,12 +343,43 @@ The builder configures:
 - Default headers
 - Basic authentication
 - Redirect handling
+- HTTP proxy
 - Connect timeout
+- Read timeout
 - Total request timeout
 - Repeated query parameter encoding
 - Response exception mapping
 
 Generated clients are cloneable. Clones share the underlying `reqwest::Client`.
+
+Clients can also load runtime settings from a config key. By default the key is
+the trait name; pass `config_key` to choose a stable deployment-facing name:
+
+```rust
+# use catnap::{rest_client, Result};
+#[rest_client(path = "/users", config_key = "users-api")]
+trait Users {
+    #[get("")]
+    async fn list(&self) -> Result<()>;
+}
+
+let client = UsersClient::from_env()?;
+# Ok::<_, catnap::Error>(())
+```
+
+`from_env()` and `builder().load_env()?` read MicroProfile-style keys such as
+`users-api/mp-rest/url` and shell-friendly keys such as:
+
+- `CATNAP_USERS_API_URL`
+- `CATNAP_USERS_API_FOLLOW_REDIRECTS`
+- `CATNAP_USERS_API_PROXY` or `CATNAP_USERS_API_PROXY_ADDRESS`
+- `CATNAP_USERS_API_CONNECT_TIMEOUT`
+- `CATNAP_USERS_API_READ_TIMEOUT`
+- `CATNAP_USERS_API_QUERY_PARAM_STYLE`
+- `CATNAP_DISABLE_DEFAULT_MAPPER`
+
+See [Runtime configuration](docs/configuration.md) for the full set of keys,
+precedence rules and examples.
 
 ## Error handling
 
@@ -358,6 +391,7 @@ Common error variants include:
 - `MissingBaseUrl` when `.base_url(...)` was not configured
 - `InvalidBaseUrl` and `InvalidRequestUrl` for URL construction failures
 - `InvalidHeaderName` and `InvalidHeaderValue` for invalid headers
+- `InvalidConfigValue` for malformed environment configuration
 - `UnsupportedMediaType` when a feature or media type is not supported
 - `Request` for `reqwest` transport errors
 - `JsonDeserialize` and `XmlDeserialize` for response decoding errors

@@ -204,6 +204,21 @@ fn main() {}
             "duplicate `path` argument",
         ),
         CompileCase::fail(
+            "empty_config_key",
+            r#"
+use catnap::{rest_client, Result};
+
+#[rest_client(config_key = "")]
+trait Api {
+    #[get("/items")]
+    async fn list(&self) -> Result<()>;
+}
+
+fn main() {}
+"#,
+            "config_key must not be empty",
+        ),
+        CompileCase::fail(
             "missing_path_argument",
             r#"
 use catnap::{rest_client, Result};
