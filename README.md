@@ -348,6 +348,7 @@ The builder configures:
 - Read timeout
 - Total request timeout
 - Repeated query parameter encoding
+- Request and response filters
 - Response exception mapping
 
 Generated clients are cloneable. Clones share the underlying `reqwest::Client`.
@@ -421,6 +422,16 @@ impl StdError for RateLimited {}
 
 let client = UsersClient::builder()
     .base_url("https://api.example.com")?
+    .request_filter(100, |request| {
+        request
+            .headers_mut()
+            .insert("X-Request-Id", "trace-123".parse().unwrap());
+        Ok(())
+    })
+    .response_filter(100, |response| {
+        tracing::debug!(status = %response.status());
+        Ok(())
+    })
     .response_exception_mapper(100, |response: &ResponseExceptionContext<'_>| {
         if response.status() == catnap::http::StatusCode::TOO_MANY_REQUESTS {
             Some(Error::mapped_response(RateLimited))
@@ -443,6 +454,9 @@ let client = UsersClient::builder()
 Catnap emits `tracing` debug events for outgoing requests and incoming
 responses. It logs method, URL, headers and body where the body can be cloned or
 has already been buffered for typed decoding.
+
+Logging runs after request and response filters, so logs reflect the request and
+response state Catnap will use for execution, error mapping and decoding.
 
 Sensitive headers are redacted:
 

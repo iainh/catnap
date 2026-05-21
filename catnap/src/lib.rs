@@ -121,7 +121,8 @@
 //!
 //! Catnap emits `tracing` debug events for outgoing requests and incoming
 //! responses. Sensitive headers such as `Authorization`, `Proxy-Authorization`,
-//! `Cookie`, and `Set-Cookie` are redacted.
+//! `Cookie`, and `Set-Cookie` are redacted. Logging runs after request and
+//! response filters.
 
 pub use catnap_macros::rest_client;
 pub use http;
@@ -436,6 +437,173 @@ where
 
 type ResponseExceptionMapperFn =
     dyn for<'a> Fn(&ResponseExceptionContext<'a>) -> Option<Error> + Send + Sync;
+type RequestFilterFn = dyn for<'a> Fn(&mut RequestFilterContext<'a>) -> Result<()> + Send + Sync;
+type ResponseFilterFn = dyn for<'a> Fn(&mut ResponseFilterContext<'a>) -> Result<()> + Send + Sync;
+
+/// Ordered filter that can inspect or mutate an outgoing HTTP request.
+///
+/// Filters with lower priority values run first.
+#[derive(Clone)]
+pub struct RequestFilter {
+    priority: i32,
+    filter: Arc<RequestFilterFn>,
+}
+
+impl RequestFilter {
+    /// Creates a request filter with the given priority.
+    pub fn new(
+        priority: i32,
+        filter: impl for<'a> Fn(&mut RequestFilterContext<'a>) -> Result<()> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            priority,
+            filter: Arc::new(filter),
+        }
+    }
+
+    /// Returns the filter priority. Lower values run first.
+    pub fn priority(&self) -> i32 {
+        self.priority
+    }
+
+    fn filter_request(&self, request: &mut RequestFilterContext<'_>) -> Result<()> {
+        (self.filter)(request)
+    }
+}
+
+impl std::fmt::Debug for RequestFilter {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RequestFilter")
+            .field("priority", &self.priority)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Ordered filter that can inspect or mutate an incoming HTTP response.
+///
+/// Filters with lower priority values run first. Typed response methods expose
+/// the buffered response body; raw streaming response methods expose status,
+/// URL, and headers only.
+#[derive(Clone)]
+pub struct ResponseFilter {
+    priority: i32,
+    filter: Arc<ResponseFilterFn>,
+}
+
+impl ResponseFilter {
+    /// Creates a response filter with the given priority.
+    pub fn new(
+        priority: i32,
+        filter: impl for<'a> Fn(&mut ResponseFilterContext<'a>) -> Result<()> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            priority,
+            filter: Arc::new(filter),
+        }
+    }
+
+    /// Returns the filter priority. Lower values run first.
+    pub fn priority(&self) -> i32 {
+        self.priority
+    }
+
+    fn filter_response(&self, response: &mut ResponseFilterContext<'_>) -> Result<()> {
+        (self.filter)(response)
+    }
+}
+
+impl std::fmt::Debug for ResponseFilter {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ResponseFilter")
+            .field("priority", &self.priority)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Mutable request data available to request filters.
+pub struct RequestFilterContext<'a> {
+    request: &'a mut reqwest::Request,
+}
+
+impl RequestFilterContext<'_> {
+    /// Returns the HTTP method.
+    pub fn method(&self) -> &Method {
+        self.request.method()
+    }
+
+    /// Returns the request URL.
+    pub fn url(&self) -> &Url {
+        self.request.url()
+    }
+
+    /// Returns the mutable request URL.
+    pub fn url_mut(&mut self) -> &mut Url {
+        self.request.url_mut()
+    }
+
+    /// Returns the request headers.
+    pub fn headers(&self) -> &HeaderMap {
+        self.request.headers()
+    }
+
+    /// Returns the mutable request headers.
+    pub fn headers_mut(&mut self) -> &mut HeaderMap {
+        self.request.headers_mut()
+    }
+
+    /// Adds or replaces a request header.
+    pub fn header(&mut self, name: HeaderName, value: HeaderValue) {
+        self.request.headers_mut().insert(name, value);
+    }
+}
+
+/// Mutable response data available to response filters.
+pub struct ResponseFilterContext<'a> {
+    status: StatusCode,
+    url: &'a Url,
+    headers: &'a mut HeaderMap,
+    body: Option<&'a mut Vec<u8>>,
+}
+
+impl ResponseFilterContext<'_> {
+    /// Returns the HTTP response status.
+    pub fn status(&self) -> StatusCode {
+        self.status
+    }
+
+    /// Returns the response URL.
+    pub fn url(&self) -> &Url {
+        self.url
+    }
+
+    /// Returns the response headers.
+    pub fn headers(&self) -> &HeaderMap {
+        self.headers
+    }
+
+    /// Returns the mutable response headers.
+    pub fn headers_mut(&mut self) -> &mut HeaderMap {
+        self.headers
+    }
+
+    /// Returns the buffered response body when available.
+    pub fn body(&self) -> Option<&[u8]> {
+        self.body.as_deref().map(Vec::as_slice)
+    }
+
+    /// Returns the mutable buffered response body when available.
+    pub fn body_mut(&mut self) -> Option<&mut Vec<u8>> {
+        self.body.as_deref_mut()
+    }
+
+    /// Returns the buffered response body decoded as UTF-8 lossily when available.
+    pub fn body_text_lossy(&self) -> Option<String> {
+        self.body()
+            .map(|body| String::from_utf8_lossy(body).into_owned())
+    }
+}
 
 /// Ordered mapper that can turn an HTTP response into an application error.
 ///
@@ -643,6 +811,37 @@ impl<T> RestClientBuilder<T> {
         self
     }
 
+    /// Registers a request filter for generated client methods.
+    ///
+    /// Filters with lower priority values run first, after Catnap has built the
+    /// final request URL, query string, headers, and body.
+    pub fn request_filter(
+        mut self,
+        priority: i32,
+        filter: impl for<'a> Fn(&mut RequestFilterContext<'a>) -> Result<()> + Send + Sync + 'static,
+    ) -> Self {
+        self.config
+            .request_filters
+            .push(RequestFilter::new(priority, filter));
+        self
+    }
+
+    /// Registers a response filter for generated client methods.
+    ///
+    /// Filters with lower priority values run first. Typed response methods
+    /// provide a buffered body to filters; raw response methods expose response
+    /// metadata only.
+    pub fn response_filter(
+        mut self,
+        priority: i32,
+        filter: impl for<'a> Fn(&mut ResponseFilterContext<'a>) -> Result<()> + Send + Sync + 'static,
+    ) -> Self {
+        self.config
+            .response_filters
+            .push(ResponseFilter::new(priority, filter));
+        self
+    }
+
     /// Registers a response exception mapper for typed response methods.
     ///
     /// Mappers with lower priority values run first. The first mapper that
@@ -731,6 +930,10 @@ pub struct RestClientConfig {
     pub connect_timeout: Option<Duration>,
     /// Encoding style for repeated query parameters.
     pub query_param_style: QueryParamStyle,
+    /// Custom filters for outgoing requests.
+    pub request_filters: Vec<RequestFilter>,
+    /// Custom filters for incoming responses.
+    pub response_filters: Vec<ResponseFilter>,
     /// Custom response exception mappers for typed response methods.
     pub response_exception_mappers: Vec<ResponseExceptionMapper>,
     /// Whether statuses `>= 400` are mapped to [`Error::Http`] by default.
@@ -749,6 +952,8 @@ impl Default for RestClientConfig {
             read_timeout: None,
             connect_timeout: None,
             query_param_style: QueryParamStyle::default(),
+            request_filters: Vec::new(),
+            response_filters: Vec::new(),
             response_exception_mappers: Vec::new(),
             default_response_exception_mapper: true,
         }
@@ -929,6 +1134,8 @@ pub struct RestClient {
     client: reqwest::Client,
     default_headers: HeaderMap,
     query_param_style: QueryParamStyle,
+    request_filters: Vec<RequestFilter>,
+    response_filters: Vec<ResponseFilter>,
     response_exception_mappers: Vec<ResponseExceptionMapper>,
     default_response_exception_mapper: bool,
 }
@@ -969,12 +1176,18 @@ impl RestClient {
 
         let mut response_exception_mappers = config.response_exception_mappers;
         response_exception_mappers.sort_by_key(ResponseExceptionMapper::priority);
+        let mut request_filters = config.request_filters;
+        request_filters.sort_by_key(RequestFilter::priority);
+        let mut response_filters = config.response_filters;
+        response_filters.sort_by_key(ResponseFilter::priority);
 
         Ok(Self {
             base_url,
             client: client.build()?,
             default_headers: config.default_headers,
             query_param_style: config.query_param_style,
+            request_filters,
+            response_filters,
             response_exception_mappers,
             default_response_exception_mapper: config.default_response_exception_mapper,
         })
@@ -993,6 +1206,8 @@ impl RestClient {
             builder: self.client.request(method, url),
             query_param_style: self.query_param_style,
             query_params: Vec::new(),
+            request_filters: self.request_filters.clone(),
+            response_filters: self.response_filters.clone(),
             response_exception_mappers: self.response_exception_mappers.clone(),
             default_response_exception_mapper: self.default_response_exception_mapper,
         }
@@ -1005,6 +1220,8 @@ pub struct RequestBuilder {
     builder: reqwest::RequestBuilder,
     query_param_style: QueryParamStyle,
     query_params: Vec<(String, String)>,
+    request_filters: Vec<RequestFilter>,
+    response_filters: Vec<ResponseFilter>,
     response_exception_mappers: Vec<ResponseExceptionMapper>,
     default_response_exception_mapper: bool,
 }
@@ -1130,44 +1347,34 @@ impl RequestBuilder {
                 .query_pairs_mut()
                 .extend_pairs(self.query_params);
         }
+        apply_request_filters(&mut request, &self.request_filters)?;
         Ok((client, request))
     }
 
     async fn send_streaming(self) -> Result<reqwest::Response> {
+        let response_filters = self.response_filters.clone();
         let (client, request) = self.build()?;
-        log_request(&request);
-        let response = client.execute(request).await?;
-        debug!(
-            status = %response.status(),
-            url = %response.url(),
-            headers = ?LoggedHeaders(response.headers()),
-            "received HTTP response"
-        );
+        let mut response = client.execute(request).await?;
+        apply_streaming_response_filters(&mut response, &response_filters)?;
         Ok(response)
     }
 
     async fn send_buffered(self) -> Result<BufferedResponse> {
+        let response_filters = self.response_filters.clone();
         let (client, request) = self.build()?;
-        log_request(&request);
         let response = client.execute(request).await?;
         let status = response.status();
         let url = response.url().clone();
         let headers = response.headers().clone();
         let body = response.bytes().await?.to_vec();
-        if tracing::enabled!(Level::DEBUG) {
-            debug!(
-                status = %status,
-                url = %url,
-                headers = ?LoggedHeaders(&headers),
-                body = ?LoggedBody(&body),
-                "received HTTP response"
-            );
-        }
-        Ok(BufferedResponse {
+        let mut response = BufferedResponse {
             status,
+            url,
             headers,
             body,
-        })
+        };
+        apply_buffered_response_filters(&mut response, &response_filters)?;
+        Ok(response)
     }
 
     /// Sends the request and returns a raw streaming response.
@@ -1296,6 +1503,55 @@ fn map_response_exception(
     None
 }
 
+fn apply_request_filters(
+    request: &mut reqwest::Request,
+    request_filters: &[RequestFilter],
+) -> Result<()> {
+    let mut context = RequestFilterContext { request };
+    for filter in request_filters {
+        filter.filter_request(&mut context)?;
+    }
+    log_request_filter(&context);
+    Ok(())
+}
+
+fn apply_streaming_response_filters(
+    response: &mut reqwest::Response,
+    response_filters: &[ResponseFilter],
+) -> Result<()> {
+    let status = response.status();
+    let url = response.url().clone();
+    let headers = response.headers_mut();
+    let mut context = ResponseFilterContext {
+        status,
+        url: &url,
+        headers,
+        body: None,
+    };
+    for filter in response_filters {
+        filter.filter_response(&mut context)?;
+    }
+    log_response_filter(&context);
+    Ok(())
+}
+
+fn apply_buffered_response_filters(
+    response: &mut BufferedResponse,
+    response_filters: &[ResponseFilter],
+) -> Result<()> {
+    let mut context = ResponseFilterContext {
+        status: response.status,
+        url: &response.url,
+        headers: &mut response.headers,
+        body: Some(&mut response.body),
+    };
+    for filter in response_filters {
+        filter.filter_response(&mut context)?;
+    }
+    log_response_filter(&context);
+    Ok(())
+}
+
 struct LoggedHeaders<'a>(&'a HeaderMap);
 
 impl std::fmt::Debug for LoggedHeaders<'_> {
@@ -1316,7 +1572,7 @@ fn is_sensitive_header(name: &HeaderName) -> bool {
     name == AUTHORIZATION || name == PROXY_AUTHORIZATION || name == COOKIE || name == SET_COOKIE
 }
 
-fn log_request(request: &reqwest::Request) {
+fn log_request_filter(request: &RequestFilterContext<'_>) {
     if !tracing::enabled!(Level::DEBUG) {
         return;
     }
@@ -1325,8 +1581,22 @@ fn log_request(request: &reqwest::Request) {
         method = %request.method(),
         url = %request.url(),
         headers = ?LoggedHeaders(request.headers()),
-        body = ?request.body().and_then(reqwest::Body::as_bytes).map(LoggedBody),
+        body = ?request.request.body().and_then(reqwest::Body::as_bytes).map(LoggedBody),
         "sending HTTP request"
+    );
+}
+
+fn log_response_filter(response: &ResponseFilterContext<'_>) {
+    if !tracing::enabled!(Level::DEBUG) {
+        return;
+    }
+
+    debug!(
+        status = %response.status(),
+        url = %response.url(),
+        headers = ?LoggedHeaders(response.headers()),
+        body = ?response.body().map(LoggedBody),
+        "received HTTP response"
     );
 }
 
@@ -1343,6 +1613,7 @@ impl std::fmt::Debug for LoggedBody<'_> {
 
 struct BufferedResponse {
     status: StatusCode,
+    url: Url,
     headers: HeaderMap,
     body: Vec<u8>,
 }

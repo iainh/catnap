@@ -252,6 +252,70 @@ async fn generated_get_joins_paths_query_params_and_headers() -> Result<()> {
 }
 
 #[tokio::test]
+async fn request_filters_run_by_priority_before_sending() -> Result<()> {
+    let server = TestServer::spawn("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n");
+
+    let client = UsersClient::builder()
+        .base_url(server.base_url())?
+        .request_filter(200, |request| {
+            request
+                .url_mut()
+                .query_pairs_mut()
+                .append_pair("filter", "late");
+            Ok(())
+        })
+        .request_filter(100, |request| {
+            request
+                .headers_mut()
+                .insert("x-filter", "early".parse().expect("valid header value"));
+            request
+                .url_mut()
+                .query_pairs_mut()
+                .append_pair("filter", "early");
+            Ok(())
+        })
+        .build()?;
+
+    let response = client.inferred("42", "roles").await?;
+
+    let request = server.request();
+    assert_eq!(response.status(), catnap::http::StatusCode::NO_CONTENT);
+    assert_eq!(
+        request.line,
+        "GET /users/42/inferred?include=roles&filter=early&filter=late HTTP/1.1"
+    );
+    assert_eq!(request.header("x-filter"), Some("early"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn response_filters_can_mutate_buffered_typed_responses() -> Result<()> {
+    let server = TestServer::spawn(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 17\r\n\r\n{\"id\":\"original\"}",
+    );
+
+    let client = UsersClient::builder()
+        .base_url(server.base_url())?
+        .response_filter(100, |response| {
+            if let Some(body) = response.body_mut() {
+                body.clear();
+                body.extend_from_slice(br#"{"id":"filtered"}"#);
+            }
+            Ok(())
+        })
+        .build()?;
+
+    let user = client.get("42").await?;
+
+    let request = server.request();
+    assert_eq!(request.line, "GET /users/42 HTTP/1.1");
+    assert_eq!(user.id, "filtered");
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn generated_path_params_are_percent_encoded_segments() -> Result<()> {
     let server = TestServer::spawn(
         "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\nAlice",

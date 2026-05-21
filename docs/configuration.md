@@ -60,6 +60,8 @@ The builder supports:
 - `read_timeout(...)` for reading response body chunks
 - `request_timeout(...)` or `timeout(...)` for the whole request deadline
 - `query_param_style(...)` for repeated query parameters
+- `request_filter(...)` for outgoing request filters
+- `response_filter(...)` for incoming response filters
 - `response_exception_mapper(...)` for custom response mapping
 - `disable_default_response_exception_mapper()` for typed response status handling
 
@@ -325,6 +327,7 @@ Environment loading configures serializable runtime settings only. Register
 custom Rust values in code, including:
 
 - Default headers that contain secrets or runtime tokens
+- Request and response filter closures
 - Response exception mapper closures
 - Custom request setup that depends on application state
 
@@ -345,6 +348,12 @@ let token = "token";
 let client = UsersClient::builder()
     .load_env()?
     .header("Authorization", format!("Bearer {token}"))?
+    .request_filter(100, |request| {
+        request
+            .headers_mut()
+            .insert("X-Request-Id", "trace-123".parse().unwrap());
+        Ok(())
+    })
     .response_exception_mapper(100, |response| {
         if response.status() == catnap::http::StatusCode::TOO_MANY_REQUESTS {
             Some(catnap::Error::mapped_response(RateLimited))
